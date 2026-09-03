@@ -15,6 +15,7 @@ int main() {
     std::cout << "val1: " << val1 << std::endl;
     std::cout << "val2: " << val2 << std::endl;
 
+    // do work
     std::cout << "Making copy to buffer" << std::endl;
     memcpy(buffer.get(), &val1, sizeof(int));
     std::cout << "Making copy to val2: " << std::endl;
