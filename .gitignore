@@ -1,0 +1,20 @@
+# CLion / IntelliJ metadata
+**/.idea/
+
+# CMake and compiler output
+**/build/
+**/cmake-build-*/
+**/CMakeFiles/
+**/Testing/
+**/Makefile
+**/cmake_install.cmake
+**/CMakeCache.txt
+**/compile_commands.json
+**/*.o
+**/*.out
+
+# Documentation
+**/docs/
+
+# Disabled nested Git metadata
+**/.git.disabled/
