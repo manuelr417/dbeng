@@ -1,7 +1,6 @@
 #include "BufferPool.h"
 #include "DataFrame.h"
 
-#include <cstddef>
 #include <iostream>
 
 namespace {
@@ -34,8 +33,8 @@ int main() {
 
     // --- access the buffer of entry n ---
     auto& f2 = pool.frame(2);
-    f2.buffer[0] = std::byte{0xAB};
-    check(pool.frame(2).buffer[0] == std::byte{0xAB},
+    f2.buffer[0] = 'A';
+    check(pool.frame(2).buffer[0] == 'A',
           "buffer of entry 2 is accessible and writable");
 
     // --- dirty flag on / off ---
