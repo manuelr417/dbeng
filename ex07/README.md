@@ -22,6 +22,7 @@ This produces two executables in `build/`:
 ```
 ex07 append <csv-file> <binary-file>
 ex07 read <binary-file> <block-number>
+ex07 scan <binary-file>
 ex07 bulk <count> <binary-file>
 ```
 
@@ -83,6 +84,28 @@ block 0: 2 record(s)
 ```
 
 Requesting a block number at or beyond the end of the file is an error.
+
+### `scan` — print every block of the binary file
+
+```bash
+./build/ex07 scan people.bin
+```
+
+Reads the whole `<binary-file>` block by block and prints each block's
+records in the same format as `read`, followed by a summary line:
+
+```
+block 0: 195 record(s)
+  slot 0: pid=1, name=Ana, age=20, city=PR
+  slot 1: pid=2, name=Bob, age=31, city=NY
+  ...
+block 1: 5 record(s)
+  slot 0: pid=196, name=P196, age=20, city=PR
+  ...
+scanned 2 block(s), 200 record(s)
+```
+
+An empty (0-byte) file scans as zero blocks; a missing file is an error.
 
 ### `bulk` — generate and append n synthetic records
 

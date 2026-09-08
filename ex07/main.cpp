@@ -14,6 +14,7 @@ void print_usage(const char* program) {
     std::cerr << "Usage:\n"
               << "  " << program << " append <csv-file> <binary-file>\n"
               << "  " << program << " read <binary-file> <block-number>\n"
+              << "  " << program << " scan <binary-file>\n"
               << "  " << program << " bulk <count> <binary-file>\n";
 }
 
@@ -107,6 +108,41 @@ int read_and_print_block(const std::string& binary_path, std::uint64_t block_num
     return 0;
 }
 
+int scan_file(const std::string& binary_path) {
+    block_file::File file;
+    std::string error;
+    if (!block_file::open_for_read(binary_path, file, error)) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+
+    const std::uint64_t blocks = block_file::block_count(file, error);
+    if (!error.empty()) {
+        block_file::close(file);
+        std::cerr << error << '\n';
+        return 1;
+    }
+
+    std::uint64_t total_records = 0;
+    std::array<char, person_serializer::kBlockSize> block{};
+    for (std::uint64_t block_number = 0; block_number < blocks; ++block_number) {
+        if (!block_file::read_block(file, block_number, block, error)) {
+            block_file::close(file);
+            std::cerr << error << '\n';
+            return 1;
+        }
+        const auto people = person_serializer::deserialize_block(block.data());
+        std::cout << "block " << block_number << ": " << people.size() << " record(s)\n";
+        for (std::size_t i = 0; i < people.size(); ++i) {
+            print_person(people[i], i);
+        }
+        total_records += people.size();
+    }
+    block_file::close(file);
+    std::cout << "scanned " << blocks << " block(s), " << total_records << " record(s)\n";
+    return 0;
+}
+
 }
 
 int main(int argc, char* argv[]) {
@@ -120,6 +156,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return read_and_print_block(argv[2], block_number);
+    }
+    if (argc == 3 && std::string(argv[1]) == "scan") {
+        return scan_file(argv[2]);
     }
     if (argc == 4 && std::string(argv[1]) == "bulk") {
         std::uint64_t count = 0;

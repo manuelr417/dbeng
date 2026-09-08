@@ -237,6 +237,12 @@ Read one block:
 ./build/ex07 read people.bin 0
 ```
 
+Scan the whole file:
+
+```bash
+./build/ex07 scan people.bin
+```
+
 Bulk-insert generated records:
 
 ```bash
@@ -246,6 +252,8 @@ Bulk-insert generated records:
 The append command loads the CSV through `person_csv::load`, opens the binary file through `block_file::open_for_append`, and passes the resulting people to `block_file::append_records`.
 
 The read command opens the file through `block_file::open_for_read`, requests one block through `block_file::read_block`, and passes that memory block to `person_serializer::deserialize_block`.
+
+The scan command opens the file the same way, obtains the total number of blocks through `block_file::block_count`, and then repeats the read command's steps for every block in order, printing each block's records in the same format as `read` followed by a final summary line (`scanned N block(s), M record(s)`).
 
 The bulk command opens the file through `block_file::open_for_append`, reads the file's current record count through `block_file::record_count`, generates `count` records starting at `record_count + 1` through `person_generator::generate`, and passes the resulting people to `block_file::append_records` — the same appending path used by the CSV command.
 
