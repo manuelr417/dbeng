@@ -23,6 +23,7 @@ bool read_block(File& file, std::uint64_t block_number,
                 std::array<char, person_serializer::kBlockSize>& block,
                 std::string& error);
 std::uint64_t block_count(File& file, std::string& error);
+std::uint64_t record_count(File& file, std::string& error);
 
 }
 

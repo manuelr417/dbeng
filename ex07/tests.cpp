@@ -1,5 +1,6 @@
 #include "BlockFile.h"
 #include "PersonCsv.h"
+#include "PersonGenerator.h"
 #include "PersonSerializer.h"
 
 #include <cassert>
@@ -82,5 +83,25 @@ int main() {
     std::remove(csv_path.c_str());
     std::remove(data_path.c_str());
     std::remove(boundary_path.c_str());
+
+    const auto generated = person_generator::generate(5, 1);
+    assert(generated.size() == 5);
+    assert(generated.front().pid == 1);
+    assert(generated.back().pid == 5);
+    assert(std::string(generated[0].name) == "P1");
+
+    const std::string bulk_path = temp_path("-bulk.bin");
+    assert(block_file::open_for_append(bulk_path, file, error));
+    assert(block_file::append_records(file, person_generator::generate(200, 1), error));
+    assert(block_file::record_count(file, error) == 200);
+    // A second bulk insert should continue pids from the existing count
+    // rather than restarting at 1, so the file gains no duplicate pids.
+    const auto more = person_generator::generate(3, static_cast<int>(block_file::record_count(file, error)) + 1);
+    assert(more.front().pid == 201);
+    assert(block_file::append_records(file, more, error));
+    assert(block_file::record_count(file, error) == 203);
+    block_file::close(file);
+    std::remove(bulk_path.c_str());
+
     std::cout << "all tests passed\n";
 }
