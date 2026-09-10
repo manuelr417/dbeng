@@ -6,9 +6,11 @@ earlier layers: `Person` records live in fixed 4096-byte blocks on disk
 manager moves blocks between disk and frames with pin counting, dirty
 write-back, and a pluggable replacement policy (LRU included).
 
-Unlike ex07 there is no CLI: the single binary runs a PASS/FAIL check suite
-that exercises every layer and finishes with a demo scan of a Person file
-through the buffer pool.
+Two binaries come out of the build: `ex09` runs a PASS/FAIL check suite that
+exercises every layer and finishes with a demo scan of a Person file through
+the buffer pool, while `ex09_demo` is the ex07-style CLI (`append`, `read`,
+`seek`, `scan`, `bulk`) running on top of the buffer pool, byte-for-byte
+compatible with ex07's binary files.
 
 ## Building
 
@@ -19,10 +21,10 @@ cmake --build build
 
 This produces two executables:
 
-- `build/ex09` — the PASS/FAIL check suite + demo scan (no CLI).
-- `build/ex09_demo` — the ex07-style CLI (`append`, `read`, `scan`, `bulk`)
-  running on top of the buffer pool; byte-for-byte compatible with ex07's
-  binary files.
+- `build/ex09` — the PASS/FAIL check suite + demo scan.
+- `build/ex09_demo` — the ex07-style CLI (`append`, `read`, `seek`, `scan`,
+  `bulk`) running on top of the buffer pool; byte-for-byte compatible with
+  ex07's binary files.
 
 (CMake ≥ 4.3 is required; CLion builds into `cmake-build-debug/` instead —
 both directories are gitignored.)
@@ -39,7 +41,7 @@ both directories are gitignored.)
 ./build/ex09_demo bulk 4000 people.bin
 ```
 
-The program creates its scratch files under `/tmp`, runs 61 checks, prints a
+The program creates its scratch files under `/tmp`, runs 74 checks, prints a
 demo scan, and exits 0 only if every check passed:
 
 ```
@@ -60,8 +62,8 @@ All checks passed.
 
 ## Structure
 
-All code is in `namespace bufman` (one namespace per project, per repo
-convention).
+All code except `Person` lives in `namespace bufman` (one namespace per
+project, per repo convention); `Person.h` stays a global struct, as in ex07.
 
 Storage layer (block file I/O, from ex07):
 
