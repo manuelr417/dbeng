@@ -15,9 +15,21 @@ cmake --build exNN/build
 ```
 
 Some exercises produce more than one binary (e.g. a check-suite plus a demo
-CLI); each exercise's README lists its targets and usage. Repo-wide
-conventions — deliberately copied headers, error-handling style, test
-patterns — are documented in [AGENTS.md](AGENTS.md).
+CLI); each exercise's README lists its targets and usage.
+
+## Conventions
+
+The exercises follow a few repo-wide rules:
+
+- Every exercise is fully self-contained: all its files live inside its own
+  directory, exercises are never wired together, and shared code is never
+  hoisted to the repo root. Common headers (`Person.h`, `DataFrame.h`) are
+  deliberately copied into each exercise that needs them instead of shared.
+- Storage-layer errors all use the same shape: a `bool` return plus an
+  `error` string out-param that is cleared on entry — an empty string after
+  the call means success.
+- There is no test framework: ex07 ships an assert-based test target, the
+  later exercises run PASS/FAIL `check()` calls inline in `main.cpp`.
 
 ## The exercises
 
