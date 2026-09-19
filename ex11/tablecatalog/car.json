@@ -1,0 +1,10 @@
+{
+  "table_name": "car",
+  "columns": [
+    { "column_name": "car_id",   "column_type": "Integer", "size": 4  },
+    { "column_name": "brand",    "column_type": "String",  "size": 15 },
+    { "column_name": "model",    "column_type": "String",  "size": 10 },
+    { "column_name": "year",     "column_type": "Integer", "size": 4  },
+    { "column_name": "owner_id", "column_type": "Integer", "size": 4  }
+  ]
+}

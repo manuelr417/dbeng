@@ -1,0 +1,9 @@
+{
+  "table_name": "person",
+  "columns": [
+    { "column_name": "pid",  "column_type": "Integer", "size": 4 },
+    { "column_name": "name", "column_type": "String",  "size": 10 },
+    { "column_name": "age",  "column_type": "Integer", "size": 4 },
+    { "column_name": "city", "column_type": "String",  "size": 3 }
+  ]
+}
