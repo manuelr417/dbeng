@@ -13,6 +13,8 @@ id. Plain C++20, no external dependencies, single-threaded by contract.
 
 ```text
 tablecatalog/   table catalogs (JSON): person.json, car.json
+person.csv      100 sample person rows, loadable with `append person …`
+car.csv         100 sample car rows, loadable with `append car …`
 tuple/          Column, Tuple, TupleSerializer — the self-describing wire format
 schema/         TableSchema, catalog loader (TableSchemaJson),
                 fixed-width record codec (RecordCodec),
@@ -136,6 +138,30 @@ A table is a JSON file in `tablecatalog/` — no code changes:
 `column_type` is `Integer`, `String`, or `Double`; `size` is a String's
 declared width (the byte width of fixed-size columns is documentation).
 Once the file exists, the CLI's commands accept its name immediately.
+
+### Sample data
+
+Two ready-made CSV files ship with the exercise, one per catalog:
+
+- `person.csv` — 100 rows for the `person` table: `pid` 1–100, names up
+  to 10 characters, ages 18–79, three-letter city codes.
+- `car.csv` — 100 rows for the `car` table: `car_id` 1–100, brands and
+  models within their declared widths, years 1998–2026, and an
+  `owner_id` in 1–100 that references `person.csv`'s pids, so the two
+  tables can be related in later exercises.
+
+Load them without any preparation:
+
+```text
+> append person person.csv people.bin
+appended 100 record(s), skipped 0 row(s)
+> append car car.csv cars.bin
+appended 100 record(s), skipped 0 row(s)
+```
+
+Both fit in a single page (185 person records or 107 car records per
+4096-byte block), so a `scan` of either file reports `scanned 100
+record(s)` on one page.
 
 ## Architecture overview
 
