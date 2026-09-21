@@ -42,11 +42,13 @@ The exercises follow a few repo-wide rules:
 | ex09 | Pin/unpin over many files, dirty write-back, pluggable replacement (LRU), `alloc_page` | buffer manager |
 | ex10 | Fixed-length records with per-slot occupancy in a doubly linked page chain; records addressable by `RowId{page_id, slot}` | slotted pages + heap file |
 | ex11 | Schema as data: JSON table catalogs, generic self-describing tuples, fixed-width record layout derived from the catalog, session CLI over named tables | schema-driven storage engine |
+| ex12 | A hand-rolled lexer, recursive-descent parser, and AST behind `sql::parse(query, result, error)` for the SQL subset (CREATE/DROP/INSERT/UPDATE/DELETE/SELECT, JOIN/GROUP BY/ORDER BY/LIMIT) | SQL front-end |
 
 Each exercise reuses the previous ones' code and on-disk formats, so the
 later exercises form a working stack:
 
 ```text
+Lexer + Parser + AST (sql::parse)     (ex12)
 ex11_cli + schema/catalog + Tuple     (ex11)
 HeapFile / SlottedPage                (ex10)
 BufferManager + ReplacementPolicy/LRU (ex09)
