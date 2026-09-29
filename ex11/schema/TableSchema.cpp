@@ -1,5 +1,6 @@
 #include "schema/TableSchema.h"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace schema {
@@ -22,6 +23,18 @@ tuple::Column default_column(tuple::ColumnType type) {
         case tuple::ColumnType::Double:  return tuple::Column(0.0);
     }
     return tuple::Column();
+}
+
+// The width of one column in a record: natural size for numerics, the
+// declared width for Strings. 0 flags an undeclared String, which cannot
+// live in a record.
+std::size_t column_width(const ColumnSchema& column) {
+    switch (column.column_type()) {
+        case tuple::ColumnType::Integer: return 4;
+        case tuple::ColumnType::Double:  return 8;
+        case tuple::ColumnType::String:  return column.column_size();
+    }
+    return 0;
 }
 
 }
@@ -141,37 +154,126 @@ tuple::Tuple TableSchema::make_tuple() const {
     return tuple;
 }
 
-bool serialize(const TableSchema& schema, const tuple::Tuple& tuple,
+bool serialize(const tuple::Tuple& tuple, const TableSchema& schema,
                char* buffer, std::size_t max_len, std::string& error) {
+    error.clear();
+    // validate covers arity, per-position types, string widths, and NUL;
+    // its error carries the column name. Failing here means the buffer is
+    // never touched.
     if (!schema.validate(tuple, error)) {
         return false;
     }
+    // Every width must be declared before the first byte moves: a refusal
+    // never leaves a half-written record behind.
+    for (std::size_t i = 0; i < schema.column_count(); ++i) {
+        if (column_width(schema.column_info(i)) == 0) {
+            const ColumnSchema& meta = schema.column_info(i);
+            error = "column '" + meta.column_name() +
+                    "' has no declared width; record storage needs "
+                    "catalog-loaded schemas";
+            return false;
+        }
+    }
+    std::size_t cursor = 0;
     // Wire position p takes the column whose column_info index is
     // column_order[p]; that column's value lives at tuple slot
-    // column_position.
-    tuple::Tuple wire;
-    const std::vector<std::size_t>& order = schema.column_order();
-    for (std::size_t p = 0; p < order.size(); ++p) {
-        const ColumnSchema& meta = schema.column_info(order[p]);
-        wire.add_column(tuple.column(meta.column_position()));
+    // column_position. Each column's payload lands at the running offset;
+    // the schema is the layout, so nothing structural is written.
+    for (std::size_t p = 0; p < schema.column_count(); ++p) {
+        const ColumnSchema& meta = schema.column_info(schema.column_order()[p]);
+        const std::size_t width = column_width(meta);
+        if (width == 0) {
+            error = "column '" + meta.column_name() +
+                    "' has no declared width; record storage needs "
+                    "catalog-loaded schemas";
+            return false;
+        }
+        if (max_len < cursor + width) {
+            error = "record needs " + std::to_string(cursor + width) +
+                    " bytes, buffer holds " + std::to_string(max_len);
+            return false;
+        }
+        char* field = buffer + cursor;
+        const tuple::Column& column = tuple.column(meta.column_position());
+        switch (column.column_type()) {
+            case tuple::ColumnType::Integer: {
+                const int value = std::get<int>(column.column_value());
+                std::memcpy(field, &value, 4);
+                break;
+            }
+            case tuple::ColumnType::Double: {
+                const double value = std::get<double>(column.column_value());
+                std::memcpy(field, &value, 8);
+                break;
+            }
+            case tuple::ColumnType::String: {
+                const std::string& value =
+                    std::get<std::string>(column.column_value());
+                std::memcpy(field, value.data(), value.size());
+                std::memset(field + value.size(), 0, width - value.size());
+                break;
+            }
+        }
+        cursor += width;
     }
-    return tuple::serialize(wire, buffer, max_len, error);
+    return true;
 }
 
 bool deserialize(const TableSchema& schema, const char* buffer,
                  std::size_t max_len, tuple::Tuple& tuple, std::string& error) {
+    error.clear();
     tuple.clear();
-    tuple::Tuple wire;
-    if (!tuple::deserialize(buffer, max_len, wire, error)) {
-        return false;
-    }
-    // Wire position q holds the column column_info[order[q]]; its value
-    // belongs at logical slot column_position.
-    const std::vector<std::size_t>& order = schema.column_order();
-    std::vector<tuple::Column> slots(order.size());
-    for (std::size_t q = 0; q < order.size(); ++q) {
-        const ColumnSchema& meta = schema.column_info(order[q]);
-        slots[meta.column_position()] = wire.column(q);
+    std::vector<tuple::Column> slots(schema.column_count());
+    std::size_t cursor = 0;
+    for (std::size_t p = 0; p < schema.column_count(); ++p) {
+        const ColumnSchema& meta = schema.column_info(schema.column_order()[p]);
+        const std::size_t width = column_width(meta);
+        if (width == 0) {
+            error = "column '" + meta.column_name() +
+                    "' has no declared width; record storage needs "
+                    "catalog-loaded schemas";
+            return false; // the out tuple stays empty
+        }
+        if (max_len < cursor + width) {
+            error = "record needs " + std::to_string(cursor + width) +
+                    " bytes, buffer holds " + std::to_string(max_len);
+            return false; // the out tuple stays empty
+        }
+        const char* field = buffer + cursor;
+        cursor += width;
+        switch (meta.column_type()) {
+            case tuple::ColumnType::Integer: {
+                int value = 0;
+                std::memcpy(&value, field, 4);
+                slots[meta.column_position()] = tuple::Column(value);
+                break;
+            }
+            case tuple::ColumnType::Double: {
+                double value = 0.0;
+                std::memcpy(&value, field, 8);
+                slots[meta.column_position()] = tuple::Column(value);
+                break;
+            }
+            case tuple::ColumnType::String: {
+                // Value bytes up to the first NUL; everything behind it
+                // must be padding. A value filling the whole width has no
+                // NUL and no padding — both are fine.
+                std::size_t length = 0;
+                while (length < width && field[length] != '\0') {
+                    ++length;
+                }
+                for (std::size_t i = length; i < width; ++i) {
+                    if (field[i] != '\0') {
+                        error = "column '" + meta.column_name() +
+                                "': padding contains garbage";
+                        return false; // the out tuple stays empty
+                    }
+                }
+                slots[meta.column_position()] =
+                    tuple::Column(std::string(field, length));
+                break;
+            }
+        }
     }
     tuple::Tuple logical;
     for (const tuple::Column& column : slots) {
@@ -182,6 +284,21 @@ bool deserialize(const TableSchema& schema, const char* buffer,
     }
     tuple = logical;
     return true;
+}
+
+std::size_t record_size(const TableSchema& schema) {
+    if (schema.column_count() == 0) {
+        return 0;
+    }
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < schema.column_count(); ++i) {
+        const std::size_t width = column_width(schema.column_info(i));
+        if (width == 0) {
+            return 0; // an undeclared-width String has no record layout
+        }
+        total += width;
+    }
+    return total;
 }
 
 }

@@ -3,7 +3,6 @@
 
 #include "schema/ColumnSchema.h"
 #include "tuple/Tuple.h"
-#include "tuple/TupleSerializer.h"
 
 #include <cstddef>
 #include <optional>
@@ -71,16 +70,31 @@ private:
                                    std::string& error);
 };
 
-/// Schema-driven serialization: validate, permute the tuple into wire
-/// order, then delegate to tuple::serialize (the one encoding path).
-bool serialize(const TableSchema& schema, const tuple::Tuple& tuple,
+/// Storage serialization: the one serializer in the engine. The schema
+/// supplies everything structural — the arity, each position's type, each
+/// String's declared width, and the wire order (column_order) — so the
+/// record bytes are values only: each column's payload at its running
+/// offset, Integer 4 bytes, Double 8, String value bytes NUL-padded to
+/// column_size. Validates the tuple against the schema first and fails
+/// before touching the buffer (arity, types, widths, NUL; a String with no
+/// declared width cannot live in a record). max_len is a bound, not a
+/// target — trailing bytes are left untouched.
+bool serialize(const tuple::Tuple& tuple, const TableSchema& schema,
                char* buffer, std::size_t max_len, std::string& error);
 
-/// Schema-driven deserialization: tuple::deserialize, un-permute into
-/// column_position order, validate against the schema. The out tuple is
-/// cleared first and stays empty on any failure.
+/// Reads a record written by serialize(): walks the columns in wire order,
+/// reassembles the logical tuple (un-permuting into column_position
+/// order), verifies that every String's padding is all NUL, and validates
+/// the result against the schema. The out tuple is cleared first and
+/// stays empty on any failure.
 bool deserialize(const TableSchema& schema, const char* buffer,
                  std::size_t max_len, tuple::Tuple& tuple, std::string& error);
+
+/// Total fixed record width for `schema`: 4 bytes per Integer column, 8
+/// per Double, column_size per String. Returns 0 for an empty schema or
+/// one with undeclared-width String columns; serialize/deserialize report
+/// the named error for those.
+std::size_t record_size(const TableSchema& schema);
 
 }
 

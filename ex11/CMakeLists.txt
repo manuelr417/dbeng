@@ -10,10 +10,8 @@ set(CORE_SOURCES
     heapfile/SlottedPage.cpp heapfile/SlottedPage.h
     heapfile/HeapFile.cpp heapfile/HeapFile.h
     tuple/Column.h tuple/Tuple.cpp tuple/Tuple.h
-    tuple/TupleSerializer.cpp tuple/TupleSerializer.h
     schema/ColumnSchema.h schema/TableSchema.cpp schema/TableSchema.h
     schema/TableSchemaJson.cpp schema/TableSchemaJson.h
-    schema/RecordCodec.cpp schema/RecordCodec.h
     schema/TableCsv.cpp schema/TableCsv.h
     schema/TableGenerator.cpp schema/TableGenerator.h)
 

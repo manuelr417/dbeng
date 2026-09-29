@@ -15,9 +15,8 @@ id. Plain C++20, no external dependencies, single-threaded by contract.
 tablecatalog/   table catalogs (JSON): person.json, car.json
 person.csv      100 sample person rows, loadable with `append person …`
 car.csv         100 sample car rows, loadable with `append car …`
-tuple/          Column, Tuple, TupleSerializer — the self-describing wire format
-schema/         TableSchema, catalog loader (TableSchemaJson),
-                fixed-width record codec (RecordCodec),
+tuple/          Column, Tuple — the logical row
+schema/         TableSchema (the one serializer), catalog loader (TableSchemaJson),
                 CSV loader (TableCsv), row generator (TableGenerator)
 heapfile/       SlottedPage (page layout), HeapFile (records in a page chain)
 bufpool/        BufferManager, BufferPool, DataFrame
@@ -49,9 +48,9 @@ into `cmake-build-debug/` instead; both directories are gitignored.)
 build/ex11
 ```
 
-Takes no arguments. It prints one `PASS:`/`FAIL:` line per check — 334 of
-them, covering the tuple wire format, the schema layer, the catalog
-loader, the record codec, the heap file (insert/find/update/erase/scan,
+Takes no arguments. It prints one `PASS:`/`FAIL:` line per check — 320 of
+them, covering the record serializer, the tuple and schema layers, the
+catalog loader, the heap file (insert/find/update/erase/scan,
 page splits, persistence, schema guards), the CSV and generator modules,
 and the buffer manager — then a summary. Exit code is `0` when all checks
 pass, `1` otherwise.
@@ -169,21 +168,24 @@ The layers, bottom to top — each includes only the layers below it:
 
 ```text
 ex11_cli     session CLI: REPL, table-name resolution, printing
-schema/      TableSchema, catalog loader, record codec, CSV loader, generator
+schema/      TableSchema (the one serializer), catalog loader, CSV loader, generator
 heapfile/    SlottedPage (page layout), HeapFile (records in a page chain)
 bufpool/     BufferManager (pin/unpin, eviction, per-file close), BufferPool
 policy/      ReplacementPolicy interface + LRU
 file/        BlockFile (raw 4096-byte block I/O)
-tuple/       Column, Tuple, TupleSerializer (the self-describing wire format)
+tuple/       Column, Tuple (the logical row)
 ```
 
-The engine carries **two encodings for one schema**. On the wire, a tuple
-is self-describing — a column count plus, per column, a type tag, a
-length, and the payload — so a generic reader can walk it without knowing
-the table. On disk, records are fixed-width: each column sits at an
-offset derived from the catalog's declared widths (for the `person`
-catalog: 4+10+4+3 = 21 bytes per record, 185 records per 4096-byte page),
-with the schema acting as the tag. The heap file stores them in a chain
+The engine carries **one encoding**. A record is values only: each column
+sits at an offset derived from the catalog's declared widths (for the
+`person` catalog: 4+10+4+3 = 21 bytes per record, 185 records per
+4096-byte page), with the schema acting as the tag — it says how many
+columns there are, which type sits at which offset, and how wide each
+String is, so nothing structural travels in the bytes. The schema's
+serializer is the only element that writes or reads tuples: it validates
+every tuple against the catalog on the way in and out, and the String
+NUL-padding check is the on-disk damage detector. The heap file stores
+records in a chain
 of slotted pages addressed by `RowId{page, slot}`; block 0 is a header
 page carrying the chain head plus the table's name, so a file can be
 verified against the catalog it is opened with. All of it is driven by

@@ -1,14 +1,12 @@
 #include "bufpool/BufferManager.h"
 #include "heapfile/HeapFile.h"
 #include "policy/LRUPolicy.h"
-#include "schema/RecordCodec.h"
 #include "schema/TableCsv.h"
 #include "schema/TableGenerator.h"
 #include "schema/TableSchema.h"
 #include "schema/TableSchemaJson.h"
 #include "tuple/Column.h"
 #include "tuple/Tuple.h"
-#include "tuple/TupleSerializer.h"
 
 #include <array>
 #include <cstdint>
@@ -102,205 +100,112 @@ int main() {
         check(threw, "column(99) throws std::out_of_range");
     }
 
-    // --- 4. serialized_size ---
+    // --- 4. Record serialization: values only, layout from the schema ---
     {
-        check(tuple::serialized_size(tuple::Tuple()) == 4,
-              "empty tuple serializes to 4 bytes");
-
-        tuple::Tuple one;
-        one.add(7);
-        check(tuple::serialized_size(one) == 16, "single int tuple is 16 bytes");
-
-        tuple::Tuple example;
-        example.add(42);
-        example.add(std::string("Ruth"));
-        example.add(3.14);
-        check(tuple::serialized_size(example) == 44, "the 44-byte worked example");
-
-        tuple::Tuple long_str;
-        long_str.add(1);
-        long_str.add(std::string(300, 'x'));
-        long_str.add(2.0);
-        check(tuple::serialized_size(long_str) == 4 + 12 + 308 + 16,
-              "long-string tuple size is hand-computed");
-    }
-
-    // --- 5. Byte-for-byte layout: {42, "Ruth", 3.14} ---
-    {
+        schema::TableSchema person("");
+        check(schema::load_table_schema("tablecatalog/person.json", person, error),
+              "load person.json for the record tests");
         tuple::Tuple t;
         t.add(42);
         t.add(std::string("Ruth"));
-        t.add(3.14);
-        std::array<char, 64> got{};
-        check(tuple::serialize(t, got.data(), got.size(), error), "serialize succeeds");
-        check(error.empty(), "no error left behind on success");
-
-        // Built by hand from the layout table in tuple.md section 6.
-        std::array<char, 44> expected{};
-        const std::int32_t count = 3;
-        std::memcpy(expected.data() + 0, &count, 4);
-        const std::int32_t t0 = 0, l0 = 4, v0 = 42;
-        std::memcpy(expected.data() + 4, &t0, 4);
-        std::memcpy(expected.data() + 8, &l0, 4);
-        std::memcpy(expected.data() + 12, &v0, 4);
-        const std::int32_t t1 = 1, l1 = 4;
-        std::memcpy(expected.data() + 16, &t1, 4);
-        std::memcpy(expected.data() + 20, &l1, 4);
-        std::memcpy(expected.data() + 24, "Ruth", 4);
-        const std::int32_t t2 = 2, l2 = 8;
-        std::memcpy(expected.data() + 28, &t2, 4);
-        std::memcpy(expected.data() + 32, &l2, 4);
-        const double v2 = 3.14;
-        std::memcpy(expected.data() + 36, &v2, 8);
-        check(std::memcmp(got.data(), expected.data(), 44) == 0,
-              "wire bytes match the section-6 layout exactly");
-    }
-
-    // --- 6. Round-trips ---
-    {
-        std::array<char, bufman::kPageSize> buf{};
-        auto round_trip = [&](const tuple::Tuple& in) {
-            if (!tuple::serialize(in, buf.data(), buf.size(), error)) return false;
-            tuple::Tuple out;
-            if (!tuple::deserialize(buf.data(), buf.size(), out, error)) return false;
-            return out == in;
-        };
-
-        tuple::Tuple ints;
-        ints.add(1);
-        check(round_trip(ints), "round-trip: single int");
-        tuple::Tuple neg;
-        neg.add(-5);
-        check(round_trip(neg), "round-trip: negative int");
-        tuple::Tuple doubles;
-        doubles.add(3.14);
-        check(round_trip(doubles), "round-trip: single double");
-        tuple::Tuple neg_d;
-        neg_d.add(-0.5);
-        check(round_trip(neg_d), "round-trip: negative double");
-        tuple::Tuple str;
-        str.add(std::string("Ruth"));
-        check(round_trip(str), "round-trip: single string");
-        tuple::Tuple empty_str;
-        empty_str.add(std::string(""));
-        check(round_trip(empty_str), "round-trip: empty string");
-        tuple::Tuple long_str;
-        long_str.add(std::string(300, 'x'));
-        check(round_trip(long_str), "round-trip: 300-char string");
-
-        tuple::Tuple mixed;
-        mixed.add(42);
-        mixed.add(std::string("Ruth"));
-        mixed.add(3.14);
-        mixed.add(std::string(""));
-        check(round_trip(mixed), "round-trip: mixed 4-column tuple");
-    }
-
-    // --- 7. Overwrite semantics ---
-    {
-        std::array<char, 64> buf{};
-        tuple::Tuple a;
-        a.add(1);
-        a.add(std::string("one"));
-        check(tuple::serialize(a, buf.data(), buf.size(), error), "serialize first tuple");
-
-        tuple::Tuple target;
-        target.add(std::string("stale"));
-        target.add(9.9);
-        target.add(3);
-        check(tuple::deserialize(buf.data(), buf.size(), target, error),
-              "deserialize over a non-empty tuple");
-        check(target == a, "old columns are gone after deserialize");
-    }
-
-    // --- 8. Trailing bytes ignored ---
-    {
-        std::array<char, bufman::kPageSize> buf{};
-        std::memset(buf.data(), 0x5A, buf.size());
-        tuple::Tuple t;
         t.add(7);
-        const std::size_t tuple_size = tuple::serialized_size(t);
-        check(tuple::serialize(t, buf.data(), buf.size(), error),
-              "serialize into the marked buffer");
-        tuple::Tuple out;
-        check(tuple::deserialize(buf.data(), buf.size(), out, error),
-              "deserialize from a full 4096-byte block");
-        check(out == t, "tuple content intact");
+        t.add(std::string("HU"));
+        std::array<char, 64> buf{};
+        std::memset(buf.data(), 0x5A, buf.size());
+        check(schema::serialize(t, person, buf.data(), buf.size(), error),
+              "serialize succeeds");
+        check(error.empty(), "no error left behind on success");
+        check(schema::record_size(person) == 21,
+              "record_size is 21 (4 + 10 + 4 + 3)");
+
+        // Bytes past the record are untouched: max_len is a bound.
         bool marker_survives = true;
-        for (std::size_t i = tuple_size; i < buf.size(); ++i) {
+        for (std::size_t i = 21; i < buf.size(); ++i) {
             if (buf[i] != 0x5A) {
                 marker_survives = false;
             }
         }
-        check(marker_survives, "bytes past the tuple are untouched");
-    }
+        check(marker_survives, "bytes past the record are untouched");
 
-    // --- 9. Error paths ---
-    {
-        tuple::Tuple t;
-        t.add(42);
-        t.add(std::string("Ruth"));
-        t.add(3.14);
-        std::array<char, 64> buf{};
-        check(tuple::serialize(t, buf.data(), buf.size(), error),
-              "serialize the example tuple for corruption");
+        // Round-trip over a non-empty target: old columns are gone.
+        tuple::Tuple target = person.make_tuple();
+        target.clear();
+        target.add(999);
+        target.add(std::string("stale"));
+        target.add(999);
+        target.add(std::string("stale"));
+        check(schema::deserialize(person, buf.data(), buf.size(), target, error),
+              "deserialize over a non-empty tuple");
+        check(target == t, "old columns are gone after deserialize");
 
-        check(!tuple::serialize(t, buf.data(), 43, error) && !error.empty(),
+        // The read needs the whole record; anything less refuses with the
+        // out tuple empty.
+        tuple::Tuple out;
+        check(!schema::deserialize(person, buf.data(), 20, out, error) &&
+                  !error.empty() && out.column_count() == 0,
+              "a truncated record fails");
+
+        // Same for the write: the bound is checked before any byte moves.
+        std::array<char, 20> small{};
+        check(!schema::serialize(t, person, small.data(), small.size(), error) &&
+                  !error.empty(),
               "serialize refuses a too-small buffer");
-
-        tuple::Tuple out;
-        check(!tuple::deserialize(buf.data(), 3, out, error) && !error.empty() &&
-                  out.column_count() == 0,
-              "buffer smaller than the column count fails");
-        check(!tuple::deserialize(buf.data(), 20, out, error) && !error.empty() &&
-                  out.column_count() == 0,
-              "truncated header of column 1 fails");
-        check(!tuple::deserialize(buf.data(), 26, out, error) && !error.empty() &&
-                  out.column_count() == 0,
-              "truncated payload of column 1 fails");
-
-        buf[4] = 7; // column 0's type tag: Integer -> 7
-        check(!tuple::deserialize(buf.data(), buf.size(), out, error) && !error.empty(),
-              "unknown type tag fails");
-        check(error.find("7") != std::string::npos, "error names the bad type");
-        buf[4] = 0;
-
-        const std::int32_t int_len_8 = 8;
-        std::memcpy(buf.data() + 8, &int_len_8, 4);
-        check(!tuple::deserialize(buf.data(), buf.size(), out, error) && !error.empty(),
-              "Integer column with length 8 fails");
-        const std::int32_t int_len_4 = 4;
-        std::memcpy(buf.data() + 8, &int_len_4, 4);
-
-        const std::int32_t dbl_len_4 = 4;
-        std::memcpy(buf.data() + 32, &dbl_len_4, 4);
-        check(!tuple::deserialize(buf.data(), buf.size(), out, error) && !error.empty(),
-              "Double column with length 4 fails");
     }
 
-    // --- 10. Mirror violation on the wire ---
-    // An in-memory mirror violation is unrepresentable: Column's fields are
-    // private and its constructors are the only writers. serialize()
-    // re-checks the mirror anyway (defense in depth); here the same check
-    // fires on the wire, where bytes are untrusted.
+    // --- 5. Round-trips through the one serializer ---
     {
-        tuple::Tuple t;
-        t.add(42);
-        t.add(std::string("Ruth"));
-        t.add(3.14);
-        std::array<char, 64> buf{};
-        check(tuple::serialize(t, buf.data(), buf.size(), error),
-              "serialize a valid tuple for tag patching");
-        buf[4] = 2; // column 0: Integer tag -> Double tag, length still says 4
-        tuple::Tuple out;
-        check(!tuple::deserialize(buf.data(), buf.size(), out, error) && !error.empty() &&
-                  out.column_count() == 0,
-              "patched tag (Double with a 4-byte length) is refused");
-        check(error.find("does not match") != std::string::npos,
-              "error names the type/length mismatch");
+        schema::TableSchema person(""), car("");
+        check(schema::load_table_schema("tablecatalog/person.json", person, error),
+              "load person.json for the round-trips");
+        check(schema::load_table_schema("tablecatalog/car.json", car, error),
+              "load car.json for the round-trips");
+        const auto round_trip = [&](const schema::TableSchema& schema,
+                                    const tuple::Tuple& in) {
+            std::array<char, 128> buf{};
+            if (!schema::serialize(in, schema, buf.data(), buf.size(), error)) {
+                return false;
+            }
+            tuple::Tuple out;
+            if (!schema::deserialize(schema, buf.data(), buf.size(), out,
+                                     error)) {
+                return false;
+            }
+            return out == in;
+        };
+        tuple::Tuple short_str;
+        short_str.add(1);
+        short_str.add(std::string("Ruth"));
+        short_str.add(42);
+        short_str.add(std::string("HU"));
+        check(round_trip(person, short_str), "round-trip: short strings");
+        tuple::Tuple empty_str;
+        empty_str.add(2);
+        empty_str.add(std::string(""));
+        empty_str.add(3);
+        empty_str.add(std::string(""));
+        check(round_trip(person, empty_str), "round-trip: empty strings");
+        tuple::Tuple full_str;
+        full_str.add(3);
+        full_str.add(std::string("1234567890"));
+        full_str.add(4);
+        full_str.add(std::string("ABC"));
+        check(round_trip(person, full_str), "round-trip: full-width strings");
+        tuple::Tuple neg;
+        neg.add(-5);
+        neg.add(std::string("x"));
+        neg.add(-2);
+        neg.add(std::string("y"));
+        check(round_trip(person, neg), "round-trip: negative ints");
+        tuple::Tuple car_tuple;
+        car_tuple.add(9);
+        car_tuple.add(std::string("Volvo"));
+        car_tuple.add(std::string("240"));
+        car_tuple.add(1976);
+        car_tuple.add(3);
+        check(round_trip(car, car_tuple), "round-trip: a car record");
     }
 
-    // --- 11. Through the buffer pool ---
+    // --- 6. Through the buffer pool ---
     {
         const std::string path = temp_path();
         bufman::BufferManager mgr;
@@ -308,14 +213,19 @@ int main() {
         bufman::File file;
         check(mgr.open_file(path, file, error), "open scratch file through the manager");
 
+        schema::TableSchema person("");
+        check(schema::load_table_schema("tablecatalog/person.json", person, error),
+              "load person.json for the pool test");
         tuple::Tuple out;
         out.add(7);
         out.add(std::string("persist"));
-        out.add(2.5);
+        out.add(2);
+        out.add(std::string("XY"));
 
         std::size_t f;
         check(mgr.alloc_page(file, 0, f, error), "alloc_page block 0");
-        check(tuple::serialize(out, mgr.frame(f).buffer, bufman::kPageSize, error),
+        check(schema::serialize(out, person, mgr.frame(f).buffer,
+                                bufman::kPageSize, error),
               "serialize into the frame buffer");
         mgr.unpin(f, true, error);
         check(error.empty(), "unpin dirty");
@@ -332,7 +242,8 @@ int main() {
         std::size_t h;
         check(mgr.pin(file, 0, h, error), "re-pin block 0 (miss: back from disk)");
         tuple::Tuple in;
-        check(tuple::deserialize(mgr.frame(h).buffer, bufman::kPageSize, in, error),
+        check(schema::deserialize(person, mgr.frame(h).buffer,
+                                  bufman::kPageSize, in, error),
               "deserialize from the frame buffer");
         check(in == out, "tuple survives the pool/disk path unchanged");
 
@@ -462,141 +373,136 @@ int main() {
               "slot 2 defaults to 0.0");
     }
 
-    // --- Schema test 7: identity-order serialize is byte-identical ---
+    // --- Schema test 7: identity order, byte-for-byte ---
     {
         schema::TableSchema people("people");
         std::string err;
         people.add_column("name", tuple::ColumnType::String, err);
         people.add_column("age", tuple::ColumnType::Integer, err);
         people.add_column("height", tuple::ColumnType::Double, err);
+        // Code-built schemas have no declared widths — load one that does.
+        schema::TableSchema person("");
+        check(schema::load_table_schema("tablecatalog/person.json", person, err),
+              "load person.json for the byte test");
         tuple::Tuple logical;
+        logical.add(7);
         logical.add(std::string("Ruth"));
         logical.add(42);
-        logical.add(3.14);
-        check(people.validate(logical, err), "hand-built logical tuple validates");
-        std::array<char, 64> via_schema{};
-        check(schema::serialize(people, logical, via_schema.data(), via_schema.size(), err),
-              "schema serialize with default order");
-        std::array<char, 64> via_plain{};
-        check(tuple::serialize(logical, via_plain.data(), via_plain.size(), err),
-              "plain serialize of the same tuple");
-        check(std::memcmp(via_schema.data(), via_plain.data(), 44) == 0,
-              "identity order: bytes identical to the plain serializer");
+        logical.add(std::string("HU"));
+        check(person.validate(logical, err), "hand-built logical tuple validates");
+        std::array<char, 64> got{};
+        check(schema::serialize(logical, person, got.data(), got.size(), err),
+              "serialize with the default order");
+        // Hand-built values-only layout: pid@0, name@4 padded to 10, age@14,
+        // city@18 padded to 3.
+        std::array<char, 21> expected{};
+        const int pid = 7, age = 42;
+        std::memcpy(expected.data() + 0, &pid, 4);
+        std::memcpy(expected.data() + 4, "Ruth", 4);
+        std::memcpy(expected.data() + 14, &age, 4);
+        std::memcpy(expected.data() + 18, "HU", 2);
+        check(std::memcmp(got.data(), expected.data(), 21) == 0,
+              "identity order: bytes match the value layout exactly");
     }
 
-    // --- Schema test 8: permutation on the wire ({2, 0, 1}) ---
+    // --- Schema test 8: permutation changes the byte order ({3, 0, 1, 2}) ---
     {
-        schema::TableSchema people("people");
+        schema::TableSchema person("");
         std::string err;
-        people.add_column("name", tuple::ColumnType::String, err);
-        people.add_column("age", tuple::ColumnType::Integer, err);
-        people.add_column("height", tuple::ColumnType::Double, err);
-        check(people.set_column_order({2, 0, 1}, err), "install wire order {2,0,1}");
+        check(schema::load_table_schema("tablecatalog/person.json", person, err),
+              "load person.json for the permutation test");
+        check(person.set_column_order({3, 0, 1, 2}, err),
+              "install wire order {3,0,1,2}");
 
         tuple::Tuple logical;
+        logical.add(7);
         logical.add(std::string("Ruth"));
         logical.add(42);
-        logical.add(3.14);
+        logical.add(std::string("HU"));
         std::array<char, 64> buf{};
-        check(schema::serialize(people, logical, buf.data(), buf.size(), err),
+        check(schema::serialize(logical, person, buf.data(), buf.size(), err),
               "permuting serialize");
 
-        // Option A reading of {2,0,1}: wire = [height, name, age].
-        std::array<char, 44> expected{};
-        const std::int32_t count = 3;
-        std::memcpy(expected.data() + 0, &count, 4);
-        const std::int32_t t0 = 2, l0 = 8;
-        std::memcpy(expected.data() + 4, &t0, 4);
-        std::memcpy(expected.data() + 8, &l0, 4);
-        const double v0 = 3.14;
-        std::memcpy(expected.data() + 12, &v0, 8);
-        const std::int32_t t1 = 1, l1 = 4;
-        std::memcpy(expected.data() + 20, &t1, 4);
-        std::memcpy(expected.data() + 24, &l1, 4);
-        std::memcpy(expected.data() + 28, "Ruth", 4);
-        const std::int32_t t2 = 0, l2 = 4, v2 = 42;
-        std::memcpy(expected.data() + 32, &t2, 4);
-        std::memcpy(expected.data() + 36, &l2, 4);
-        std::memcpy(expected.data() + 40, &v2, 4);
-        check(std::memcmp(buf.data(), expected.data(), 44) == 0,
-              "wire bytes match [height, name, age]");
+        // Wire = [city, pid, name, age]: city@0 padded to 3, pid@3, name@7
+        // padded to 10, age@17.
+        std::array<char, 21> expected{};
+        const int pid = 7, age = 42;
+        std::memcpy(expected.data() + 0, "HU", 2);
+        std::memcpy(expected.data() + 3, &pid, 4);
+        std::memcpy(expected.data() + 7, "Ruth", 4);
+        std::memcpy(expected.data() + 17, &age, 4);
+        check(std::memcmp(buf.data(), expected.data(), 21) == 0,
+              "wire bytes match [city, pid, name, age]");
 
         tuple::Tuple back;
-        check(schema::deserialize(people, buf.data(), buf.size(), back, err),
+        check(schema::deserialize(person, buf.data(), buf.size(), back, err),
               "permuting deserialize");
         check(back == logical, "round-trip returns the logical-order tuple");
     }
 
-    // --- Schema test 9: schema-guarded deserialize ---
+    // --- Schema test 9: value-layout corruption is caught on read ---
     {
-        schema::TableSchema people("people");
+        schema::TableSchema person("");
         std::string err;
-        people.add_column("name", tuple::ColumnType::String, err);
-        people.add_column("age", tuple::ColumnType::Integer, err);
-        people.add_column("height", tuple::ColumnType::Double, err);
-        people.set_column_order({2, 0, 1}, err);
-
+        check(schema::load_table_schema("tablecatalog/person.json", person, err),
+              "load person.json for the corruption test");
         tuple::Tuple logical;
+        logical.add(7);
         logical.add(std::string("Ruth"));
         logical.add(42);
-        logical.add(3.14);
+        logical.add(std::string("HU"));
         std::array<char, 64> buf{};
-        check(schema::serialize(people, logical, buf.data(), buf.size(), err),
-              "serialize for tag patching");
+        check(schema::serialize(logical, person, buf.data(), buf.size(), err),
+              "serialize for the padding corruption");
 
-        // Wire column 1 is "name" (String). Retag it as Integer — its length
-        // of 4 keeps the bytes internally consistent, so the plain
-        // deserializer accepts them; only the schema can object.
-        buf[20] = 0;
+        // Byte 9 is name-field padding (value ends at 7, NUL at 8). With no
+        // tags to validate, the padding check is what catches damage.
+        buf[9] = 'X';
         tuple::Tuple out;
-        check(tuple::deserialize(buf.data(), buf.size(), out, err),
-              "plain deserializer accepts the bytes");
-        check(!schema::deserialize(people, buf.data(), buf.size(), out, err) &&
+        check(!schema::deserialize(person, buf.data(), buf.size(), out, err) &&
                   !err.empty() && out.column_count() == 0,
-              "schema wrapper refuses the type mismatch");
+              "garbage in the string padding is refused");
     }
 
     // --- Schema test 10: failure discipline on serialize ---
     {
-        schema::TableSchema people("people");
+        schema::TableSchema person("");
         std::string err;
-        people.add_column("name", tuple::ColumnType::String, err);
-        people.add_column("age", tuple::ColumnType::Integer, err);
-        people.add_column("height", tuple::ColumnType::Double, err);
+        check(schema::load_table_schema("tablecatalog/person.json", person, err),
+              "load person.json for the refusal test");
         tuple::Tuple wrong;
         wrong.add(1);
         std::array<char, 64> buf{};
-        check(!schema::serialize(people, wrong, buf.data(), buf.size(), err) &&
+        check(!schema::serialize(wrong, person, buf.data(), buf.size(), err) &&
                   !err.empty(),
               "schema serialize refuses a mismatched tuple");
     }
 
     // --- Schema test 11: by-name workflow ---
     {
-        schema::TableSchema people("people");
+        schema::TableSchema person("");
         std::string err;
-        people.add_column("name", tuple::ColumnType::String, err);
-        people.add_column("age", tuple::ColumnType::Integer, err);
-        people.add_column("height", tuple::ColumnType::Double, err);
+        check(schema::load_table_schema("tablecatalog/person.json", person, err),
+              "load person.json for the by-name workflow");
 
         const std::size_t age_slot =
-            people.column_info(*people.column_index("age")).column_position();
-        check(age_slot == 1, "by-name mapping lands on tuple slot 1");
+            person.column_info(*person.column_index("age")).column_position();
+        check(age_slot == 2, "by-name mapping lands on tuple slot 2");
 
         // Tuple columns are immutable values: filling by name means
         // rebuilding with the named slot replaced.
         tuple::Tuple filled;
-        const tuple::Tuple fresh = people.make_tuple();
+        const tuple::Tuple fresh = person.make_tuple();
         for (std::size_t p = 0; p < fresh.column_count(); ++p) {
             filled.add_column(p == age_slot ? tuple::Column(42) : fresh.column(p));
         }
-        check(people.validate(filled, err), "filled tuple validates");
+        check(person.validate(filled, err), "filled tuple validates");
 
         std::array<char, 64> buf{};
-        check(schema::serialize(people, filled, buf.data(), buf.size(), err),
+        check(schema::serialize(filled, person, buf.data(), buf.size(), err),
               "serialize the by-name-filled tuple");
         tuple::Tuple back;
-        check(schema::deserialize(people, buf.data(), buf.size(), back, err),
+        check(schema::deserialize(person, buf.data(), buf.size(), back, err),
               "deserialize it back");
         check(std::get<int>(back.column(age_slot).column_value()) == 42,
               "read 'age' back by name");
@@ -682,7 +588,7 @@ int main() {
         t.add(std::string("HU"));
         check(person.validate(t, err), "a hand-built person tuple validates");
         std::array<char, 64> buf{};
-        check(schema::serialize(person, t, buf.data(), buf.size(), err),
+        check(schema::serialize(t, person, buf.data(), buf.size(), err),
               "serialize a person tuple over the loaded schema");
         tuple::Tuple back;
         check(schema::deserialize(person, buf.data(), buf.size(), back, err),
@@ -847,8 +753,8 @@ int main() {
         t.add(42);
         t.add(std::string("HU"));
         std::array<char, 64> buf{};
-        check(schema::pack(person, t, buf.data(), buf.size(), err),
-              "pack a person tuple");
+        check(schema::serialize(t, person, buf.data(), buf.size(), err),
+              "serialize a person tuple");
         // Hand-built from the layout table: pid@0, name@4 with NUL padding
         // to 10, age@14, city@18 with NUL padding to 3.
         std::array<char, 21> expected{};
@@ -873,11 +779,11 @@ int main() {
         const auto round_trip = [&](const schema::TableSchema& schema,
                                     const tuple::Tuple& in) {
             std::array<char, 128> buf{};
-            if (!schema::pack(schema, in, buf.data(), buf.size(), err)) {
+            if (!schema::serialize(in, schema, buf.data(), buf.size(), err)) {
                 return false;
             }
             tuple::Tuple out;
-            if (!schema::unpack(schema, buf.data(), buf.size(), out, err)) {
+            if (!schema::deserialize(schema, buf.data(), buf.size(), out, err)) {
                 return false;
             }
             return out == in;
@@ -926,7 +832,7 @@ int main() {
         wide.add(std::string("12345678901"));
         wide.add(42);
         wide.add(std::string("HU"));
-        check(!schema::pack(person, wide, buf.data(), buf.size(), err) &&
+        check(!schema::serialize(wide, person, buf.data(), buf.size(), err) &&
                   !err.empty() && err.find("width") != std::string::npos,
               "a string wider than its column is refused, naming the width");
 
@@ -935,14 +841,14 @@ int main() {
         with_nul.add(std::string("Ru\0th", 5));
         with_nul.add(42);
         with_nul.add(std::string("HU"));
-        check(!schema::pack(person, with_nul, buf.data(), buf.size(), err) &&
+        check(!schema::serialize(with_nul, person, buf.data(), buf.size(), err) &&
                   !err.empty() && err.find("NUL") != std::string::npos,
               "a string containing NUL is refused");
 
         tuple::Tuple arity;
         arity.add(1);
         arity.add(std::string("x"));
-        check(!schema::pack(person, arity, buf.data(), buf.size(), err) &&
+        check(!schema::serialize(arity, person, buf.data(), buf.size(), err) &&
                   !err.empty(),
               "wrong arity is refused");
 
@@ -951,7 +857,7 @@ int main() {
         wrong_type.add(std::string("Ruth"));
         wrong_type.add(2.5);
         wrong_type.add(std::string("HU"));
-        check(!schema::pack(person, wrong_type, buf.data(), buf.size(), err) &&
+        check(!schema::serialize(wrong_type, person, buf.data(), buf.size(), err) &&
                   !err.empty(),
               "wrong type is refused");
 
@@ -960,7 +866,7 @@ int main() {
         tuple::Tuple cb;
         cb.add(1);
         cb.add(std::string("x"));
-        check(!schema::pack(code_built, cb, buf.data(), buf.size(), err) &&
+        check(!schema::serialize(cb, code_built, buf.data(), buf.size(), err) &&
                   !err.empty() &&
                   err.find("no declared width") != std::string::npos,
               "a code-built schema is refused for record packing");
@@ -971,7 +877,7 @@ int main() {
                 marker = false;
             }
         }
-        check(marker, "failed packs leave the buffer untouched");
+        check(marker, "failed serializations leave the buffer untouched");
     }
 
     // --- Heap test 4: padding integrity ---
@@ -986,11 +892,11 @@ int main() {
         t.add(2);
         t.add(std::string("HU"));
         std::array<char, 64> buf{};
-        check(schema::pack(person, t, buf.data(), buf.size(), err),
-              "pack for the padding corruption");
+        check(schema::serialize(t, person, buf.data(), buf.size(), err),
+              "serialize for the padding corruption");
         buf[9] = 'X'; // name field: value ends at 7, NUL at 8, byte 9 is padding
         tuple::Tuple out;
-        check(!schema::unpack(person, buf.data(), buf.size(), out, err) &&
+        check(!schema::deserialize(person, buf.data(), buf.size(), out, err) &&
                   !err.empty() &&
                   err.find("padding") != std::string::npos &&
                   out.column_count() == 0,
@@ -1727,12 +1633,12 @@ int main() {
         check(sequence_ok, "the first Integer column counts first_id upward");
         check(strings_ok, "strings stay within their declared width, no NUL");
         std::array<char, 64> buf{};
-        check(schema::pack(person, tuples[0], buf.data(), buf.size(), err),
-              "pack a generated tuple");
+        check(schema::serialize(tuples[0], person, buf.data(), buf.size(), err),
+              "serialize a generated tuple");
         tuple::Tuple back;
-        check(schema::unpack(person, buf.data(), buf.size(), back, err) &&
+        check(schema::deserialize(person, buf.data(), buf.size(), back, err) &&
                   back == tuples[0],
-              "generated rows round-trip through pack/unpack");
+              "generated rows round-trip through the serializer");
     }
 
     std::cout << (failures == 0 ? "\nAll checks passed." : "\nSome checks FAILED.")

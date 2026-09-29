@@ -1,7 +1,5 @@
 #include "heapfile/HeapFile.h"
 
-#include "schema/RecordCodec.h"
-
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -235,10 +233,11 @@ bool HeapFile::insert(const tuple::Tuple& tuple, RowId& row_id,
     if (!require_open(error)) {
         return false;
     }
-    // pack validates the tuple against the schema first (arity, types,
-    // string widths) and fails before any page is pinned.
+    // serialize validates the tuple against the schema first (arity,
+    // types, string widths) and fails before any page is pinned.
     std::array<char, bufman::kPageSize> record{};
-    if (!schema::pack(*schema_, tuple, record.data(), record.size(), error)) {
+    if (!schema::serialize(tuple, *schema_, record.data(), record.size(),
+                           error)) {
         return false;
     }
 
@@ -374,7 +373,8 @@ bool HeapFile::find(const RowId row_id, tuple::Tuple& tuple,
     if (!got) {
         return false;
     }
-    return schema::unpack(*schema_, record.data(), record.size(), tuple, error);
+    return schema::deserialize(*schema_, record.data(), record.size(), tuple,
+                               error);
 }
 
 bool HeapFile::update(const RowId row_id, const tuple::Tuple& tuple,
@@ -383,7 +383,8 @@ bool HeapFile::update(const RowId row_id, const tuple::Tuple& tuple,
         return false;
     }
     std::array<char, bufman::kPageSize> record{};
-    if (!schema::pack(*schema_, tuple, record.data(), record.size(), error)) {
+    if (!schema::serialize(tuple, *schema_, record.data(), record.size(),
+                           error)) {
         return false;
     }
     std::size_t frame = 0;
@@ -464,8 +465,8 @@ bool HeapFileIterator::next(tuple::Tuple& tuple, std::string& error) {
             // Copy first, decode after the pin is released: the record
             // bytes live in the frame buffer only while it stays pinned.
             release(file_->manager_, frame, false);
-            if (!schema::unpack(*file_->schema_, record.data(), record.size(),
-                                tuple, error)) {
+            if (!schema::deserialize(*file_->schema_, record.data(),
+                                     record.size(), tuple, error)) {
                 return false;
             }
             current_ = RowId{page_id_, slot};
