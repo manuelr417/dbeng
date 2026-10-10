@@ -18,3 +18,12 @@
 
 # Disabled nested Git metadata
 **/.git.disabled/
+
+# OpenSpec working state
+**/openspec/
+
+# Scratch notes
+**/separator.md
+
+# macOS metadata
+**/.DS_Store

@@ -9,20 +9,6 @@
 
 namespace schema {
 
-namespace {
-
-const ColumnSchema& column_at_position(const TableSchema& schema,
-                                       std::size_t position) {
-    for (std::size_t i = 0; i < schema.column_count(); ++i) {
-        if (schema.column_info(i).column_position() == position) {
-            return schema.column_info(i);
-        }
-    }
-    return schema.column_info(0); // unreachable: positions are a permutation
-}
-
-}
-
 std::vector<tuple::Tuple> generate_tuples(const TableSchema& schema,
                                           std::size_t count,
                                           std::uint32_t seed,
@@ -38,7 +24,7 @@ std::vector<tuple::Tuple> generate_tuples(const TableSchema& schema,
     for (std::size_t i = 0; i < count; ++i) {
         tuple::Tuple tuple;
         for (std::size_t p = 0; p < schema.column_count(); ++p) {
-            const ColumnSchema& column = column_at_position(schema, p);
+            const ColumnSchema& column = schema.column_info(p);
             switch (column.column_type()) {
                 case tuple::ColumnType::Integer: {
                     // The first Integer column is the record's visible

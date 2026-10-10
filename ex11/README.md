@@ -16,8 +16,9 @@ tablecatalog/   table catalogs (JSON): person.json, car.json
 person.csv      100 sample person rows, loadable with `append person …`
 car.csv         100 sample car rows, loadable with `append car …`
 tuple/          Column, Tuple — the logical row
-schema/         TableSchema (the one serializer), catalog loader (TableSchemaJson),
-                CSV loader (TableCsv), row generator (TableGenerator)
+schema/         TupleSerializer (the one serializer), TableSchema,
+                catalog loader (TableSchemaJson), CSV loader (TableCsv),
+                row generator (TableGenerator)
 heapfile/       SlottedPage (page layout), HeapFile (records in a page chain)
 bufpool/        BufferManager, BufferPool, DataFrame
 policy/         ReplacementPolicy interface + LRUPolicy
@@ -48,7 +49,7 @@ into `cmake-build-debug/` instead; both directories are gitignored.)
 build/ex11
 ```
 
-Takes no arguments. It prints one `PASS:`/`FAIL:` line per check — 320 of
+Takes no arguments. It prints one `PASS:`/`FAIL:` line per check — 325 of
 them, covering the record serializer, the tuple and schema layers, the
 catalog loader, the heap file (insert/find/update/erase/scan,
 page splits, persistence, schema guards), the CSV and generator modules,
@@ -92,21 +93,20 @@ Commands select a table by **name** — the CLI resolves it to
 Example session:
 
 ```text
-> append person people.csv people.bin
-line 1: column 'pid': expected an integer
-appended 2 record(s), skipped 1 row(s)
+> append person person.csv people.bin
+appended 100 record(s), skipped 0 row(s)
 > bulk person 420 people.bin
 appended 420 generated record(s)
 > scan person people.bin
-(1,0)  pid=1, name=Alice, age=30, city=PR
-(1,1)  pid=2, name=Bob, age=25, city=NY
+(1,0)  pid=1, name=Cleo Craig, age=53, city=SEO
+(1,1)  pid=2, name=Greta, age=72, city=CAL
 ...
-scanned 422 record(s)
+scanned 520 record(s)
 > read person people.bin 1 0
-(1,0)  (pool hit)  pid=1, name=Alice, age=30, city=PR
-> seek person people.bin 1 1 1 0
-(1,1)  (pool hit)  pid=2, name=Bob, age=25, city=NY
-(1,0)  (pool hit)  pid=1, name=Alice, age=30, city=PR
+(1,0)  (pool hit)  pid=1, name=Cleo Craig, age=53, city=SEO
+> seek person people.bin 2 1 1 0
+(2,1)  (pool hit)  pid=187, name=wpkvphd, age=359, city=c
+(1,0)  (pool hit)  pid=1, name=Cleo Craig, age=53, city=SEO
 > quit
 ```
 
@@ -168,11 +168,12 @@ The layers, bottom to top — each includes only the layers below it:
 
 ```text
 ex11_cli     session CLI: REPL, table-name resolution, printing
-schema/      TableSchema (the one serializer), catalog loader, CSV loader, generator
+schema/      TupleSerializer (the one serializer), TableSchema,
+             catalog loader, CSV loader, generator
 heapfile/    SlottedPage (page layout), HeapFile (records in a page chain)
 bufpool/     BufferManager (pin/unpin, eviction, per-file close), BufferPool
-policy/      ReplacementPolicy interface + LRU
-file/        BlockFile (raw 4096-byte block I/O)
+policy/      ReplacementPolicy interface + LRUPolicy
+file/        BlockFile — raw 4096-byte block I/O
 tuple/       Column, Tuple (the logical row)
 ```
 
@@ -181,10 +182,12 @@ sits at an offset derived from the catalog's declared widths (for the
 `person` catalog: 4+10+4+3 = 21 bytes per record, 185 records per
 4096-byte page), with the schema acting as the tag — it says how many
 columns there are, which type sits at which offset, and how wide each
-String is, so nothing structural travels in the bytes. The schema's
-serializer is the only element that writes or reads tuples: it validates
+String is, so nothing structural travels in the bytes. Record bytes are
+written and read only by `TupleSerializer` — the one serializer, a type
+bound to the table's schema: it validates
 every tuple against the catalog on the way in and out, and the String
-NUL-padding check is the on-disk damage detector. The heap file stores
+NUL-padding check is the on-disk damage detector. Columns are addressed
+by creation-order index and by name. The heap file stores
 records in a chain
 of slotted pages addressed by `RowId{page, slot}`; block 0 is a header
 page carrying the chain head plus the table's name, so a file can be

@@ -13,8 +13,8 @@ The layers, bottom to top — each includes only the layers below it:
 
 ```text
 ex11_cli        session CLI: REPL, table-name resolution, printing
-schema/         TableSchema (the one serializer), JSON catalog loader,
-                CSV loader, row generator
+schema/         TupleSerializer (the one serializer), TableSchema,
+                JSON catalog loader, CSV loader, row generator
 heapfile/       SlottedPage (page layout), HeapFile (record chain)
 bufpool/        BufferManager (pin/unpin, eviction, per-file close),
                 BufferPool/DataFrame
@@ -50,12 +50,14 @@ omits.
 
 ## schema/ — TableSchema: the table's logical structure
 
-`schema::ColumnSchema` is one column's metadata: name, type, position
-(its slot in a schema-shaped tuple), and **declared width**
+`schema::ColumnSchema` is one column's metadata: name, type, and
+**declared width**
 (`column_size` — a String's maximum character count, the byte width the
-catalog declares for it; 0 means undeclared). `schema::TableSchema`
+catalog declares for it; 0 means undeclared). A column's position is its
+index in the schema's column list — creation order — which is also its
+tuple slot and its wire position. `schema::TableSchema`
 holds a table's name, its columns (added through `add_column`, the one
-writer of positions and the name map), a `column_order` permutation, and
+writer of the creation order and the name map), and
 the operations built on them:
 
 - `validate(tuple, error)` — the tuple must have one column per schema
@@ -66,25 +68,24 @@ the operations built on them:
   strings, zeros), the starting point for filling rows.
 - `column_index(name)` — lookup by name; `column_info(i)` — metadata by
   index; both used by every higher layer to address columns by name.
-- `install_column_order(...)` / `column_order()` — a permutation of
-  positions. The default is identity; a non-identity order changes the
-  **record** order: the serializer writes columns in
-  `column_order[0], column_order[1], ...` order and restores the logical
-  order on read, refusing tuples whose shape disagrees. This exists to
-  demonstrate that logical order and physical order can differ.
-- `schema::serialize` / `schema::deserialize` — **the one serializer in
-  the engine**, driven entirely by the schema. The record carries values
-  only — nothing structural: the arity is the schema's column count, each
-  position's type is the schema's, each String's width is the declared
-  `column_size` (value bytes NUL-padded to it), and the order is
-  `column_order`. Write: `validate` first (failing before the buffer is
-  touched), then each column's payload at its running offset. Read: walk
-  the columns in record order, reassemble the logical tuple, verify every
-  String's padding is all NUL, and `validate` the result. A record that
-  disagrees with the declared structure fails with a named error instead
-  of yielding wrong data; without per-field tags, the padding check is
-  what catches on-disk damage.
-- `schema::record_size` — the record width the schema implies (4 per
+  Columns are addressed exactly two ways — by creation-order index and
+  by name — and a successful name lookup returns the index, which is
+  also the tuple slot and the wire position.
+- `schema::TupleSerializer` — **the one serializer in the engine**, a
+  type bound to one `TableSchema` at construction; its
+  `serialize`/`deserialize`/`record_size()` take no schema parameter.
+  The record carries values only — nothing structural: the arity is the
+  schema's column count, each position's type is the schema's, each
+  String's width is the declared `column_size` (value bytes NUL-padded
+  to it), and the order is creation order. Write: `validate` first
+  (failing before the buffer is touched), then each column's payload at
+  its running offset. Read: walk the columns in creation order, verify
+  every String's padding is all NUL, and `validate` the result. A record
+  that disagrees with the declared structure fails with a named error
+  instead of yielding wrong data; without per-field tags, the padding
+  check is what catches on-disk damage. The bound schema must outlive
+  the serializer.
+- `record_size()` — the record width the schema implies (4 per
   Integer, 8 per Double, `column_size` per String); 0 flags an empty
   schema or an undeclared-width String, which cannot live in a record.
 
@@ -109,8 +110,8 @@ per table:
 `TableSchema`; `parse_table_schema(text, ...)` is the string-level core
 the file wrapper calls (tests use it directly). The mapping is one-for-one:
 `table_name` becomes the schema name, each `columns` entry becomes one
-`add_column` in file order (so positions are 0..n-1 and `column_order` is
-identity), and `size` becomes the column's declared width. `column_type`
+`add_column` in file order (so the creation order is the catalog's file
+order), and `size` becomes the column's declared width. `column_type`
 accepts exactly `Integer`, `String`, `Double`.
 
 The JSON parser is hand-rolled recursive descent (~200 lines) covering
@@ -128,13 +129,14 @@ a half-loaded schema behind.
 ## schema — the storage encoding (continued)
 
 The heap file stores records of **one fixed size per table**, derived
-entirely from the catalog. `record_size(schema)` sums the column widths:
+entirely from the catalog. `TupleSerializer::record_size()` sums the
+column widths:
 4 bytes per Integer, 8 per Double, `column_size` per String. For the
 person catalog that is 4+10+4+3 = **21 bytes** — the same layout older
 exercises hardwired for their `Person` record, now derived from
 the catalog instead of baked into a struct.
 
-The record layout, in wire (column_order) order:
+The record layout, in creation order:
 
 | Column | Width | Contents |
 |---|---|---|
@@ -142,7 +144,8 @@ The record layout, in wire (column_order) order:
 | Double | 8 | the double |
 | String | `column_size` | value bytes, then NUL padding to the full width |
 
-There is one encoding and one serializer. The schema is the tag: it says
+There is one encoding and one serializer — the schema-bound
+`TupleSerializer`. The schema is the tag: it says
 how many columns, which type at which offset, how wide each String is.
 The documented trade-off: without per-field tags there is no integrity
 for numerics — a corrupted int/double field reads back as silent
@@ -179,7 +182,8 @@ reusable).
 A `HeapFile` is a file of fixed-width tuple records stored in a chain of
 slotted pages, addressed by `RowId{page_id, slot}` (page ids are block
 numbers; block 0 is the header). `create`/`open` take the table's
-`TableSchema`, which fixes the record size for the file's lifetime.
+`TableSchema`, which fixes the record size for the file's lifetime and
+binds the file's `TupleSerializer`.
 
 - **Block 0 is the header page**: formatted like a data page but its
   slots are never used. Its record area carries a small identification
@@ -316,12 +320,13 @@ single-threaded by contract.
 
 ## main.cpp — the check suite
 
-The `ex11` binary is the regression harness: 320 PASS/FAIL `check()`
-calls covering the record serializer (the byte-level layout test,
-round-trips, buffer discipline, padding integrity, truncation refusals),
-the tuple and schema layers (validation, by-name mapping, record-order
-permutation), the catalog loader (both sample catalogs, parse- and
-content-level errors, all-or-nothing semantics), the heap file
+The `ex11` binary is the regression harness: 325 PASS/FAIL `check()`
+calls covering the record serializer (the schema-bound class, the
+byte-level layout test, round-trips, buffer discipline, padding
+integrity, truncation refusals), the tuple and schema layers (validation,
+by-name mapping, creation-order addressing), the catalog loader (both
+sample catalogs, parse- and content-level errors, all-or-nothing
+semantics), the heap file
 (insert/find/update/erase/scan, page splits at 185 records per page,
 schema guards on both write and read paths, persistence, two files
 sharing one manager, per-file close), the CSV and generator modules, and
@@ -330,9 +335,11 @@ the buffer manager. Exit code 0 iff every check passes.
 ## Design decisions worth knowing
 
 - **One encoding, one serializer.** Records are values only — the schema
-  supplies everything structural (arity, types, widths, order), so the
-  serializer lives in the schema layer and nothing else writes tuple
-  bytes. What the record omits, the catalog holds.
+  supplies everything structural (arity, types, widths), so record bytes
+  move only through `TupleSerializer`, a type bound to one schema at
+  construction; nothing else writes or reads tuple bytes. What the
+  record omits, the catalog holds. Wire order is creation order: columns
+  are addressed by creation-order index and by name, nothing else.
 - **Declared width vs actual length.** `column_size` is the catalog's
   promise about a String's maximum width; `tuple::Column`'s length is
   what a concrete value is. `validate` enforces the promise; the record

@@ -30,16 +30,6 @@ std::vector<std::string> split_row(const std::string& line) {
     return tokens;
 }
 
-const ColumnSchema& column_at_position(const TableSchema& schema,
-                                       std::size_t position) {
-    for (std::size_t i = 0; i < schema.column_count(); ++i) {
-        if (schema.column_info(i).column_position() == position) {
-            return schema.column_info(i);
-        }
-    }
-    return schema.column_info(0); // unreachable: positions are a permutation
-}
-
 }
 
 bool parse_csv_row(const TableSchema& schema, const std::string& line,
@@ -59,7 +49,7 @@ bool parse_csv_row(const TableSchema& schema, const std::string& line,
     }
     tuple::Tuple out;
     for (std::size_t p = 0; p < schema.column_count(); ++p) {
-        const ColumnSchema& column = column_at_position(schema, p);
+        const ColumnSchema& column = schema.column_info(p);
         const std::string& token = tokens[p];
         const char* begin = token.data();
         const char* end = begin + token.size();

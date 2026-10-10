@@ -386,7 +386,7 @@ bool parse_table_schema(const std::string& text, TableSchema& schema,
         return cur.fail("table name is empty");
     }
     // All checks passed: build through add_column, the one writer of the
-    // name map, the positions, and the identity column_order.
+    // name map and the column order (creation order = file order).
     TableSchema loaded(table_name);
     for (const LoadedColumn& column : columns) {
         if (!loaded.add_column(column.name, column.type, error)) {

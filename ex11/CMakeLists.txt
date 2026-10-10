@@ -11,6 +11,7 @@ set(CORE_SOURCES
     heapfile/HeapFile.cpp heapfile/HeapFile.h
     tuple/Column.h tuple/Tuple.cpp tuple/Tuple.h
     schema/ColumnSchema.h schema/TableSchema.cpp schema/TableSchema.h
+    schema/TupleSerializer.cpp schema/TupleSerializer.h
     schema/TableSchemaJson.cpp schema/TableSchemaJson.h
     schema/TableCsv.cpp schema/TableCsv.h
     schema/TableGenerator.cpp schema/TableGenerator.h)

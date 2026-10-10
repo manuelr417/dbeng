@@ -65,8 +65,7 @@ std::string print_tuple(const tuple::Tuple& tuple,
             out += ", ";
         }
         out += column.column_name() + "=";
-        const tuple::Column& value =
-            tuple.column(column.column_position());
+        const tuple::Column& value = tuple.column(i);
         switch (value.column_type()) {
             case tuple::ColumnType::Integer:
                 out += std::to_string(std::get<int>(value.column_value()));

@@ -4,10 +4,12 @@
 #include "bufpool/BufferManager.h"
 #include "heapfile/SlottedPage.h"
 #include "schema/TableSchema.h"
+#include "schema/TupleSerializer.h"
 #include "tuple/Tuple.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace heapfile {
@@ -146,6 +148,8 @@ private:
     bufman::BufferManager& manager_;
     bufman::File file_;
     const schema::TableSchema* schema_ = nullptr; // caller-owned; outlives open
+    // The record codec, bound to *schema_ at open; empty while closed.
+    std::optional<schema::TupleSerializer> serializer_;
     std::size_t record_size_ = 0;
     bool open_ = false;
 };

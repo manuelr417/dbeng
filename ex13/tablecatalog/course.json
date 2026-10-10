@@ -1,0 +1,10 @@
+{
+  "table_name": "course",
+  "columns": [
+    { "column_name": "cid", "column_type": "Integer", "size": 4 },
+    { "column_name": "cname", "column_type": "String", "size": 2 },
+    { "column_name": "ccode", "column_type": "String", "size": 8 },
+    { "column_name": "creds", "column_type": "Integer", "size": 4 }
+  ],
+  "indexes": []
+}

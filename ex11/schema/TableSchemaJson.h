@@ -12,8 +12,8 @@ namespace schema {
 /// "column_name", "column_type" (Integer/String/Double), and "size" —
 /// into a fresh schema. On failure: false, a named error ("line N: ..."),
 /// `schema` left empty. On success the caller's schema is replaced
-/// wholesale: the table name, one add_column per entry in file order
-/// (identity column_order), each column's declared size set.
+/// wholesale: the table name, one add_column per entry in file order,
+/// each column's declared size set.
 bool parse_table_schema(const std::string& text, TableSchema& schema,
                         std::string& error);
 

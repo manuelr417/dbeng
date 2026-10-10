@@ -98,7 +98,8 @@ bool HeapFile::create(const std::string& path,
         error = "cannot create \"" + path + "\": this heap file is already open";
         return false;
     }
-    const std::size_t size = schema::record_size(schema);
+    const schema::TupleSerializer serializer(schema);
+    const std::size_t size = serializer.record_size();
     if (size == 0) {
         error = "cannot create \"" + path +
                 "\": the catalog has no record layout (no columns, or "
@@ -162,7 +163,8 @@ bool HeapFile::open(const std::string& path,
         error = "cannot open \"" + path + "\": this heap file is already open";
         return false;
     }
-    const std::size_t size = schema::record_size(schema);
+    const schema::TupleSerializer serializer(schema);
+    const std::size_t size = serializer.record_size();
     if (size == 0) {
         error = "cannot open \"" + path +
                 "\": the catalog has no record layout (no columns, or "
@@ -219,6 +221,7 @@ bool HeapFile::open(const std::string& path,
         return false;
     }
     schema_ = &schema;
+    serializer_.emplace(schema);
     record_size_ = size;
     open_ = true;
     return true;
@@ -236,8 +239,7 @@ bool HeapFile::insert(const tuple::Tuple& tuple, RowId& row_id,
     // serialize validates the tuple against the schema first (arity,
     // types, string widths) and fails before any page is pinned.
     std::array<char, bufman::kPageSize> record{};
-    if (!schema::serialize(tuple, *schema_, record.data(), record.size(),
-                           error)) {
+    if (!serializer_->serialize(tuple, record.data(), record.size(), error)) {
         return false;
     }
 
@@ -373,8 +375,8 @@ bool HeapFile::find(const RowId row_id, tuple::Tuple& tuple,
     if (!got) {
         return false;
     }
-    return schema::deserialize(*schema_, record.data(), record.size(), tuple,
-                               error);
+    return serializer_->deserialize(record.data(), record.size(), tuple,
+                                    error);
 }
 
 bool HeapFile::update(const RowId row_id, const tuple::Tuple& tuple,
@@ -383,8 +385,7 @@ bool HeapFile::update(const RowId row_id, const tuple::Tuple& tuple,
         return false;
     }
     std::array<char, bufman::kPageSize> record{};
-    if (!schema::serialize(tuple, *schema_, record.data(), record.size(),
-                           error)) {
+    if (!serializer_->serialize(tuple, record.data(), record.size(), error)) {
         return false;
     }
     std::size_t frame = 0;
@@ -423,6 +424,7 @@ bool HeapFile::close(std::string& error) {
     manager_.close_file(file_, error);
     open_ = false;
     schema_ = nullptr;
+    serializer_.reset();
     record_size_ = 0;
     file_ = bufman::File{};
     return error.empty();
@@ -465,8 +467,8 @@ bool HeapFileIterator::next(tuple::Tuple& tuple, std::string& error) {
             // Copy first, decode after the pin is released: the record
             // bytes live in the frame buffer only while it stays pinned.
             release(file_->manager_, frame, false);
-            if (!schema::deserialize(*file_->schema_, record.data(),
-                                     record.size(), tuple, error)) {
+            if (!file_->serializer_->deserialize(record.data(), record.size(),
+                                                 tuple, error)) {
                 return false;
             }
             current_ = RowId{page_id_, slot};

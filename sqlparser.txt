@@ -1,0 +1,45 @@
+SQL parser options for dbeng (C++20, simplicity over performance)
+==================================================================
+
+1. Hyrise sql-parser — best fit
+   https://github.com/hyrise/sql-parser  (MIT)
+
+   - Small C++ library (bison/flex) that turns SQL into a clean, typed AST:
+     SelectStatement, InsertStatement, Expr trees, etc.
+   - Covers a solid subset: SELECT/JOIN/WHERE/GROUP BY/ORDER BY/LIMIT,
+     INSERT, UPDATE, DELETE, CREATE.
+   - Trivial API: hsql::SQLParser::parse(query, &result), then walk
+     statements. Built for the academic Hyrise project — well documented,
+     course-friendly.
+   - Caveats: plain-Makefile build (vendor the sources into your own
+     CMakeLists — fits the "everything inside exNN/" rule), and it is a
+     subset, not full SQL.
+
+2. libpg_query — most complete, least simple
+   https://github.com/pganalyze/libpg_query  (BSD-3 + PostgreSQL license)
+
+   - The actual PostgreSQL parser as a C library (DuckDB's original
+     frontend). Full real-world SQL coverage, actively maintained.
+   - Costs: ~3 min build of vendored Postgres sources, and the parse tree
+     is Postgres's internal node structs / JSON — verbose to walk.
+     Heavyweight for a course exercise, but the ceiling is much higher.
+
+3. ANTLR4 + SQL grammar — middle ground
+   https://github.com/antlr/grammars-v4  (BSD)
+
+   - Generate a C++ parser from a grammar, walk it with visitors.
+     Clean conceptually, but drags in the ANTLR C++ runtime plus a Java
+     codegen step — the most toolchain complexity of the three.
+
+4. Hand-roll one — most in the spirit of this repo
+
+   The engine has no external dependencies and builds everything from
+   scratch; a subset parser (SELECT cols FROM table WHERE expr) is
+   ~200-300 lines of straightforward recursive descent in the existing
+   style, zero deps, fully owned.
+
+Recommendation
+--------------
+Hyrise sql-parser to skip straight to the interesting parts (planning and
+executing queries over HeapFile). Hand-rolled if parsing itself is part of
+the learning arc — which, given how this repo works, it arguably is.

@@ -1,0 +1,12 @@
+{
+  "table_name": "parts",
+  "columns": [
+    { "column_name": "partid", "column_type": "Integer", "size": 4 },
+    { "column_name": "pname", "column_type": "String", "size": 10 },
+    { "column_name": "pcolor", "column_type": "String", "size": 10 },
+    { "column_name": "pweight", "column_type": "Double", "size": 8 },
+    { "column_name": "pprice", "column_type": "Double", "size": 8 },
+    { "column_name": "pmaterial", "column_type": "String", "size": 20 }
+  ],
+  "indexes": []
+}
