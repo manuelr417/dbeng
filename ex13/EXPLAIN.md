@@ -215,6 +215,37 @@ records): refused before any write. Where the per-row insert path costs
 228.8 s per 100k rows (its chain walk is quadratic), the bulk load takes
 0.2 s — the load this tool exists for.
 
+## parts_bench — the index-vs-heap benchmark
+
+One executable, one run, one report. The argument surface is `--rows N`
+(default 1,000,000, capped at 9,999,999 so the pname scheme always
+fits) and `--reuse`; the two cannot combine. A default run: clean slate
+(drop any leftover `parts` indexes and the table itself, tolerating
+absence), CREATE TABLE through the executor, deterministic generation
+(seed 42; sequential partid; seven colors; clamped-normal pprice on
+[0.5, 3000] and pweight on [1, 50]; pname = "p" + a zero-padded row
+number), bulk load through `tools::bulk_load`, then the measurement
+protocol: Q1 (`partid = K`, K = 54645 when N >= 54645, otherwise N) and
+Q2 (`pprice >= 1.0 AND pprice <= 10.0`) timed on the heap path — the
+run fails if either announces anything else — then `CREATE INDEX` on
+each query's column (build timed) and the same parsed statements
+re-run on the index path. Both paths' answer sets are compared (sorted,
+all six columns) and must be identical; the report prints the four
+query times, both build times, the load time, and the speedups. The
+serialization round-trip self-check and the data fingerprint (two runs
+with the same count must match) pin the generator's contract.
+
+A `--reuse` run re-measures on data that is already there: the indexes
+are still dropped (a genuine heap-scan baseline needs that) but the
+table is kept, N is the existing table's row count, and creation and
+loading are skipped. The rows are still regenerated in memory with the
+same seed, so the fingerprint, the Q2 expected count, and the spot
+checks verify the reused file against the generator — a stale or
+foreign file fails the run by name. Reuse without data (no catalog, no
+file, or an empty table) fails before anything is measured, and the
+report marks the provenance (`data: reused (N rows, load skipped)`) in
+place of a load time.
+
 ## main.cpp — the check suite
 
 Five suites, 1155 checks: the vendored ex11 storage suite (344), the

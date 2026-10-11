@@ -4,8 +4,10 @@ ex13 bolts a query language and the engine's first access path onto the
 ex11 storage stack. The storage modules and the ex12 SQL front-end are
 vendored in unchanged; the new work is an **ISAM index** on one column
 (bulk-built, never rebalanced), an **exec layer** that binds the parsed
-statements against the catalog and picks an access path, and a **session
-CLI** that speaks SQL. Plain C++20, no external dependencies,
+statements against the catalog and picks an access path, a **session
+CLI** that speaks SQL, a **bulk loader** that bootstraps empty heap
+files at raw-write speed, and a **parts benchmark** that measures the
+index against a full heap scan. Plain C++20, no external dependencies,
 single-threaded by contract.
 
 ```sql
@@ -37,6 +39,7 @@ exec/           NEW: Binder, Evaluator, Planner, Executor
 tools/          NEW: BulkLoader — the bootstrap loader for empty
                 heap files (raw block writes, no buffer pool)
 ex13_cli.cpp    the session CLI: SQL REPL + escape hatches
+parts_bench.cpp the index-vs-heap benchmark over generated parts rows
 main.cpp        the check suite (the ex13 binary)
 EXPLAIN.md      the design and implementation, module by module
 ```
@@ -50,7 +53,8 @@ cmake -S . -B build
 cmake --build build
 ```
 
-Binaries: `build/ex13` (checks) and `build/ex13_cli` (session).
+Binaries: `build/ex13` (checks), `build/ex13_cli` (session), and
+`build/parts_bench` (benchmark).
 
 ## Running the check suite
 
@@ -138,10 +142,33 @@ beside it. Opening a data
 file builds any catalog-declared index file that is missing (lazy
 rebuild). The escape hatches keep ex11's arbitrary-path behavior.
 
+## Running the parts benchmark
+
+```sh
+build/parts_bench                 # default: 1,000,000 rows
+build/parts_bench --rows 100000   # smaller run
+build/parts_bench --reuse         # re-measure on the existing data
+```
+
+One run: drops any leftover `parts` indexes (and the table itself,
+unless `--reuse`), creates the `parts` table, bulk-loads generated rows
+(sequential `partid`, seven colors, clamped-normal price and weight,
+fixed seed), measures Q1 (`partid = 54645`) and Q2 (`pprice >= 1.0 AND
+pprice <= 10.0`) on the heap path, builds an index on each query's
+column in turn, and re-runs the same queries on the index path. The
+report prints per-query heap vs index times with speedups, both index
+build times, the load time, the data fingerprint, and the identical-
+answers verdict for both paths. `--reuse` skips table creation and
+loading (the row count is the existing table's; the data must be there
+or the run fails by name), still regenerates the rows in memory to
+verify the reused file, and marks the report as reused. Combining
+`--rows` with `--reuse` is an argument error.
+
 ## Architecture overview
 
 ```text
 ex13_cli      SQL REPL + escape hatches
+parts_bench   index-vs-heap benchmark (--rows N, --reuse)
 exec/         Executor (dispatch, session state), Binder (names -> positions,
               static types), Evaluator (Expr -> value), Planner (access path)
 index/        IsamIndex: bulk build, lookup, range, insert, verify
