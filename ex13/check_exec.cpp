@@ -476,6 +476,73 @@ int run_exec_checks() {
         check(executor.close_all(error), "oracle session closed");
     }
 
+    // --- the planner's bound edge cases ---
+    // Shapes the random oracle never draws: several conjuncts on one
+    // indexed column (bounds must intersect, never loosen), literals of
+    // the other numeric type, and strings wider than the column. Each
+    // runs on both paths; both must succeed, agree as sets, and return
+    // the known row count.
+    {
+        check(run_sql(executor,
+                      "CREATE TABLE edges (id INTEGER, c VARCHAR(3), "
+                      "d DOUBLE)",
+                      result, error) &&
+                  run_sql(executor,
+                          "INSERT INTO edges VALUES (1, 'PR', 1.5), "
+                          "(2, 'PRX', 2.5), (3, 'ZZ', 3.5), (4, 'PRA', 2.0)",
+                          result, error) &&
+                  run_sql(executor, "CREATE INDEX edges_id ON edges (id)",
+                          result, error) &&
+                  run_sql(executor, "CREATE INDEX edges_c ON edges (c)",
+                          result, error) &&
+                  run_sql(executor, "CREATE INDEX edges_d ON edges (d)",
+                          result, error),
+              "edge-case table and its three indexes created");
+        const std::vector<std::pair<std::string, std::size_t>> cases = {
+            {"id = 1 AND id = 2", 0},
+            {"id > 2 AND id = 1", 0},
+            {"id = 2 AND id > 2", 0},
+            {"id >= 1 AND id = 2", 1},
+            {"2 = id AND id <= 2", 1},
+            {"id > 2 AND id >= 2", 2},
+            {"id < 2 AND id <= 2", 1},
+            {"id = 2.0", 1},
+            {"id > 1.5", 3},
+            {"id < 2.5 AND id > 0.5", 2},
+            {"d = 2", 1},
+            {"d > 2", 2},
+            {"c = 'PRXX'", 0},
+            {"c < 'PRXX'", 3},
+            {"c <= 'PRXX'", 3},
+            {"c > 'PRXX'", 1},
+            {"c >= 'PRXX'", 1},
+            {"c > 'PR' AND c < 'PRXX'", 2},
+        };
+        for (const auto& [where, expected] : cases) {
+            const std::string select = "SELECT * FROM edges WHERE " + where;
+            exec::StatementResult with_index;
+            exec::StatementResult without;
+            std::string index_error;
+            std::string heap_error;
+            executor.set_allow_index(true);
+            const bool index_ok =
+                run_sql(executor, select, with_index, index_error);
+            executor.set_allow_index(false);
+            const bool heap_ok = run_sql(executor, select, without, heap_error);
+            executor.set_allow_index(true);
+            std::vector<std::vector<exec::Value>> a = with_index.rows.rows;
+            std::vector<std::vector<exec::Value>> b = without.rows.rows;
+            std::sort(a.begin(), a.end());
+            std::sort(b.begin(), b.end());
+            check(index_ok && heap_ok && a == b && a.size() == expected,
+                  where + ": both paths return " + std::to_string(expected) +
+                      " row(s)" +
+                      (index_ok ? std::string() : " — index path: " + index_error) +
+                      (heap_ok ? std::string() : " — heap path: " + heap_error));
+        }
+        check(executor.close_all(error), "edge-case session closed");
+    }
+
     // --- the escape-hatch bulk path on a fresh table ---
     // A table with no data file counts as zero rows, so generated
     // numbering starts at 1 — the ex11 semantics.

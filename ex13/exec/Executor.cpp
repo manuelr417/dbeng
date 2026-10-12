@@ -806,6 +806,27 @@ bool Executor::handle_select(const sql::SelectStatement& statement,
                 hi = isam::RangeBound{to_column(*plan.bounds.hi),
                                       plan.bounds.hi_inclusive};
             }
+            // A string bound wider than the column cannot be encoded as a
+            // key. Every stored value fits the width, so cutting the bound
+            // to the width keeps the same answer: k > 'PRXX' is k > 'PRX',
+            // and k < 'PRXX' is k <= 'PRX'.
+            const std::size_t width =
+                schema.column_info(plan.bounds.column_index).column_size();
+            const auto fit = [width](std::optional<isam::RangeBound>& bound,
+                                     bool inclusive_after_cut) {
+                if (!bound) {
+                    return;
+                }
+                if (const std::string* s =
+                        std::get_if<std::string>(&bound->value.column_value());
+                    s != nullptr && s->size() > width) {
+                    bound = isam::RangeBound{
+                        tuple::Column(s->substr(0, width)),
+                        inclusive_after_cut};
+                }
+            };
+            fit(lo, false);
+            fit(hi, true);
             std::vector<isam::Rid> rids;
             if (!index->range(lo, hi, rids, error)) {
                 return false;

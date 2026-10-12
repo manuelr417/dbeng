@@ -102,8 +102,11 @@ ScanPlan plan_where(BoundExprPtr where,
             continue;
         }
 
+        // A literal of the other numeric type (id = 2.5, d > 2) cannot be
+        // encoded as a key of the column's type: residual.
         CatalogIndex found;
         if (op == sql::BinaryOp::Ne ||
+            literal_side->type != column_side->type ||
             !has_index(indexes, column_side->column_index, found)) {
             plan.residual.push_back(std::move(conjunct));
             continue;
@@ -120,12 +123,24 @@ ScanPlan plan_where(BoundExprPtr where,
             continue;
         }
         const Value value = literal_side->literal;
-        switch (op) {
-            case sql::BinaryOp::Eq:
+        // Bounds only ever tighten: an equal value never turns an
+        // exclusive bound inclusive, and equality is both >= and <=.
+        const auto tighten_lo_inclusive = [&] {
+            if (!bounds->lo || compare_values(value, *bounds->lo) > 0) {
                 bounds->lo = value;
                 bounds->lo_inclusive = true;
+            }
+        };
+        const auto tighten_hi_inclusive = [&] {
+            if (!bounds->hi || compare_values(value, *bounds->hi) < 0) {
                 bounds->hi = value;
                 bounds->hi_inclusive = true;
+            }
+        };
+        switch (op) {
+            case sql::BinaryOp::Eq:
+                tighten_lo_inclusive();
+                tighten_hi_inclusive();
                 break;
             case sql::BinaryOp::Lt:
                 if (!bounds->hi || compare_values(value, *bounds->hi) < 0 ||
@@ -136,10 +151,7 @@ ScanPlan plan_where(BoundExprPtr where,
                 }
                 break;
             case sql::BinaryOp::Le:
-                if (!bounds->hi || compare_values(value, *bounds->hi) <= 0) {
-                    bounds->hi = value;
-                    bounds->hi_inclusive = true;
-                }
+                tighten_hi_inclusive();
                 break;
             case sql::BinaryOp::Gt:
                 if (!bounds->lo || compare_values(value, *bounds->lo) > 0 ||
@@ -150,10 +162,7 @@ ScanPlan plan_where(BoundExprPtr where,
                 }
                 break;
             case sql::BinaryOp::Ge:
-                if (!bounds->lo || compare_values(value, *bounds->lo) >= 0) {
-                    bounds->lo = value;
-                    bounds->lo_inclusive = true;
-                }
+                tighten_lo_inclusive();
                 break;
             default:
                 break;
