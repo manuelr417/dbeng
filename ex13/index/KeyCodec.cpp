@@ -4,6 +4,9 @@
 
 namespace isam {
 
+// Maps a column type to its header key-type tag.
+// `type` — the column type of the indexed column.
+// Returns the matching KeyType; Integer as the fallback for unknown.
 KeyType key_type_of(tuple::ColumnType type) {
     switch (type) {
         case tuple::ColumnType::Integer: return KeyType::Integer;
@@ -13,6 +16,10 @@ KeyType key_type_of(tuple::ColumnType type) {
     return KeyType::Integer;
 }
 
+// Binds the codec to a column type and derives the key width from it:
+// 4 for Integer, 8 for Double, the declared width for String.
+// `type` — the column type; `string_width` — the declared width for a
+// String key (unused otherwise).
 KeyCodec::KeyCodec(tuple::ColumnType type, std::size_t string_width)
     : type_(type) {
     switch (type) {
@@ -22,6 +29,13 @@ KeyCodec::KeyCodec(tuple::ColumnType type, std::size_t string_width)
     }
 }
 
+// Encodes one value into fixed-width key bytes: Integer/Double by
+// memcpy, String as value bytes plus NUL padding to width().
+// `value` — the value to encode; `out` — width() bytes of caller
+// storage.
+// Returns true on success; false with `error` set for an unbound codec,
+// a type mismatch, a String wider than the width, or a String holding
+// NUL.
 bool KeyCodec::encode(const tuple::Column& value, char* out,
                       std::string& error) const {
     if (width_ == 0) {
@@ -64,6 +78,10 @@ bool KeyCodec::encode(const tuple::Column& value, char* out,
     return false;
 }
 
+// Decodes width() bytes into a Column of the key type; Strings run to
+// the first NUL, at most width() bytes.
+// `in` — the encoded key bytes.
+// Returns the decoded Column; an empty Column for an unknown type.
 tuple::Column KeyCodec::decode(const char* in) const {
     switch (type_) {
         case tuple::ColumnType::Integer: {
@@ -87,6 +105,11 @@ tuple::Column KeyCodec::decode(const char* in) const {
     return tuple::Column();
 }
 
+// Numeric order for Integer/Double (decoded first, negatives included),
+// byte order for String.
+// `a`, `b` — encoded keys, each width() bytes.
+// Returns negative when a < b, zero when equal, positive when a > b;
+// 0 for an unknown type.
 int KeyCodec::compare(const char* a, const char* b) const {
     switch (type_) {
         case tuple::ColumnType::Integer: {
@@ -110,6 +133,10 @@ int KeyCodec::compare(const char* a, const char* b) const {
     return 0;
 }
 
+// Renders an encoded key for messages: decode plus type-shaped text,
+// strings single-quoted.
+// `in` — the encoded key bytes.
+// Returns the display text ("" for an unknown type).
 std::string KeyCodec::display(const char* in) const {
     switch (type_) {
         case tuple::ColumnType::Integer:

@@ -64,10 +64,10 @@ build/ex13
 
 One `PASS:`/`FAIL:` line per check, five suites in order: the vendored
 ex11 storage suite, the vendored ex12 sql suite, the index-module suite,
-the exec-layer suite, and the bulk-loader suite — ending with the
-**differential oracle**: 300 random predicates over 500 random rows, each
-SELECT executed twice (index allowed, index suppressed) with both answers
-required to be identical. Exit code 0 when everything passes.
+the exec-layer suite — ending in the **differential oracle**: 300 random
+predicates over 500 random rows, each SELECT executed twice (index
+allowed, index suppressed) with both answers required to be identical —
+and the bulk-loader suite. Exit code 0 when everything passes.
 
 ## Running the session CLI
 
@@ -103,6 +103,11 @@ Every SELECT announces its path:
 - `(via index scan)` — the WHERE contains an equality or an AND-combined
   range on the indexed column, pinned to literal bounds (`pid = 42`,
   `pid > 10 AND pid < 50`); remaining conjuncts filter the fetched rows.
+  Further conjuncts on the same column only tighten the bounds
+  (`id > 2 AND id = 1` answers nothing); a literal of the other numeric
+  type (`id = 2.0` on an int column) stays a filter, and a string bound
+  wider than the column is cut to the column width, so the index path
+  answers what the heap path answers.
 - `(via heap scan)` — anything else, including any top-level `OR`.
 
 The choice never changes the answer: both paths return the same rows
@@ -142,6 +147,57 @@ beside it. Opening a data
 file builds any catalog-declared index file that is missing (lazy
 rebuild). The escape hatches keep ex11's arbitrary-path behavior.
 
+### Bulk loading
+
+Two routes fill a table with many rows:
+
+- **Session route — the `bulk` escape hatch.** `bulk <table> <count>
+  <file>` generates `count` rows for a catalog-declared table (seed 42;
+  numbering continues after the existing records, starting at 1 on a
+  fresh table) and inserts them per-row through the executor — the data
+  file is created on demand and every declared index is maintained as
+  it goes:
+
+  ```sql
+  CREATE TABLE person (pid INTEGER, name VARCHAR(10), age INT, city VARCHAR(3));
+  bulk person 100 person                  -- appends 100 generated rows
+  CREATE INDEX person_pid ON person (pid);
+  ```
+
+  Fine for hundreds of rows; the per-row insert walk grows quadratic,
+  so don't feed it millions.
+
+- **Bootstrap route — the bulk loader.** `tools::bulk_load`
+  (tools/BulkLoader.h) writes an entire empty heap file in one
+  sequential pass: raw 4096-byte block I/O, no buffer pool, each block
+  written exactly once. Call it from C++ right after CREATE TABLE,
+  before anything opens the data file through a buffer manager:
+
+  ```cpp
+  tools::BulkLoadStats stats;
+  std::string error;
+  const tools::RowGenerator generator =
+      [&rows](std::size_t index, tuple::Tuple& out, std::string&) {
+          out = rows[index];              // row `index` of the batch
+          return true;                    // false + error aborts the load
+      };
+  tools::bulk_load("data/parts.tbl", *schema, rows.size(), generator,
+                   stats, error);
+  ```
+
+  It accepts only a missing file (created and formatted) or an empty
+  one-block file (verified and reused); anything else is refused by
+  name before any write. The layout is engine-equivalent — the same
+  slotted pages, row ids in the same `(page, slot)` pattern — so
+  `HeapFile::open`/`scan`/`find` treat it as their own, and a later
+  `CREATE INDEX` builds over the loaded rows. `build/parts_bench` is
+  the worked end-to-end example: CREATE TABLE, bulk load, CREATE INDEX,
+  measure.
+
+With either route the order is load first, index second: `CREATE INDEX`
+builds over the rows already in the file, and the escape-hatch `bulk`
+maintains existing indexes as it inserts.
+
 ## Running the parts benchmark
 
 ```sh
@@ -156,9 +212,9 @@ unless `--reuse`), creates the `parts` table, bulk-loads generated rows
 fixed seed), measures Q1 (`partid = 54645`) and Q2 (`pprice >= 1.0 AND
 pprice <= 10.0`) on the heap path, builds an index on each query's
 column in turn, and re-runs the same queries on the index path. The
-report prints per-query heap vs index times with speedups, both index
-build times, the load time, the data fingerprint, and the identical-
-answers verdict for both paths. `--reuse` skips table creation and
+report prints each query's full text followed by its heap vs index
+times with speedups, both index build times, the load time, the data
+fingerprint, and the identical-answers verdict for both paths. `--reuse` skips table creation and
 loading (the row count is the existing table's; the data must be there
 or the run fails by name), still regenerates the rows in memory to
 verify the reused file, and marks the report as reused. Combining

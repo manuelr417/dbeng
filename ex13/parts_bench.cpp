@@ -74,6 +74,8 @@ struct Measurements {
     bool q2_agrees = false;
     std::size_t q2_expected = 0;
     std::uint64_t fingerprint = 0;
+    std::string q1_text;
+    std::string q2_text;
 };
 
 double now_ms(std::chrono::steady_clock::time_point start) {
@@ -428,8 +430,7 @@ bool check_index_files(exec::Executor& executor, std::string& error) {
     return true;
 }
 
-void print_report(const Config& config, std::size_t n, const Measurements& m,
-                  std::size_t lookup_key) {
+void print_report(const Config& config, std::size_t n, const Measurements& m) {
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "== parts_bench report ==\n";
     if (config.reuse) {
@@ -447,15 +448,13 @@ void print_report(const Config& config, std::size_t n, const Measurements& m,
         {&m.q1_heap, &m.q1_index},
         {&m.q2_heap, &m.q2_index},
     };
-    const char* const names[] = {
-        "Q1 partid = <key>:",
-        "Q2 pprice in [1.0, 10.0]:",
-    };
+    const char* const names[] = {"Q1", "Q2"};
+    const std::string* const texts[] = {&m.q1_text, &m.q2_text};
     const bool agreements[] = {m.q1_agrees, m.q2_agrees};
     for (std::size_t q = 0; q < 2; ++q) {
         const QueryTiming& heap = *pairs[q][0];
         const QueryTiming& index = *pairs[q][1];
-        std::cout << names[q] << "  (key " << lookup_key << ")\n";
+        std::cout << names[q] << ": " << *texts[q] << "\n";
         std::cout << "  heap scan : " << heap.ms << " ms   rows: "
                   << heap.row_count << "  [" << heap.access_path << "]\n";
         std::cout << "  index scan: " << index.ms << " ms   rows: "
@@ -576,14 +575,15 @@ bool measure(exec::Executor& executor, const Config& config,
     // access paths, so both timers measure identical work.
     const std::string q1_text = "SELECT * FROM parts WHERE partid = " +
                                 std::to_string(lookup_key) + ";";
+    const std::string q2_text =
+        "SELECT * FROM parts WHERE pprice >= 1.0 AND pprice <= 10.0;";
     sql::ParseResult q1;
     sql::ParseResult q2;
-    if (!sql::parse(q1_text, q1, error) ||
-        !sql::parse(
-            "SELECT * FROM parts WHERE pprice >= 1.0 AND pprice <= 10.0;",
-            q2, error)) {
+    if (!sql::parse(q1_text, q1, error) || !sql::parse(q2_text, q2, error)) {
         return false;
     }
+    m.q1_text = q1_text;
+    m.q2_text = q2_text;
 
     // Baselines: no index exists, so both must announce heap scans.
     // Both result sets are retained for the differential check.
@@ -731,7 +731,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    print_report(config, derived_rows, measurements, lookup_key);
+    print_report(config, derived_rows, measurements);
 
     std::string close_error;
     if (!executor.close_all(close_error)) {

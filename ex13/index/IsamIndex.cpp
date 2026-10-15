@@ -29,22 +29,32 @@ constexpr std::size_t kLevelsOffset = kRootOffset + 8;
 constexpr std::size_t kEntryCountOffset = kRootOffset + 12;
 constexpr std::size_t kLastBlockOffset = kRootOffset + 20;
 
+// Reads the u32 at `offset` (native endian by memcpy).
+// `buffer` — the block bytes; `offset` — byte offset of the field.
+// Returns the field value.
 std::uint32_t read_u32(const char* buffer, std::size_t offset) {
     std::uint32_t value = 0;
     std::memcpy(&value, buffer + offset, sizeof(value));
     return value;
 }
 
+// Writes the u32 `value` at `offset` (native endian by memcpy).
+// `buffer` — the block bytes; `offset` — byte offset of the field.
 void write_u32(char* buffer, std::size_t offset, std::uint32_t value) {
     std::memcpy(buffer + offset, &value, sizeof(value));
 }
 
+// Reads the u64 at `offset` (native endian by memcpy).
+// `buffer` — the block bytes; `offset` — byte offset of the field.
+// Returns the field value.
 std::uint64_t read_u64(const char* buffer, std::size_t offset) {
     std::uint64_t value = 0;
     std::memcpy(&value, buffer + offset, sizeof(value));
     return value;
 }
 
+// Writes the u64 `value` at `offset` (native endian by memcpy).
+// `buffer` — the block bytes; `offset` — byte offset of the field.
 void write_u64(char* buffer, std::size_t offset, std::uint64_t value) {
     std::memcpy(buffer + offset, &value, sizeof(value));
 }
@@ -103,6 +113,10 @@ std::size_t check_entries(const EntryPage& page, const KeyCodec& codec,
 
 }  // namespace
 
+// Binds the index to a manager, schema, and column, and derives the
+// key codec from the column's type and declared width.
+// `manager` — the shared buffer pool; `schema` — the table's schema;
+// `column_index` — the position of the indexed column.
 IsamIndex::IsamIndex(bufman::BufferManager& manager,
                      const schema::TableSchema& schema,
                      std::size_t column_index)
@@ -118,6 +132,10 @@ IsamIndex::IsamIndex(bufman::BufferManager& manager,
 
 // --- header -----------------------------------------------------------------
 
+// Serializes the header image into the pinned block 0 at the fixed
+// offsets: magic, key type and width, the two names with lengths, and
+// the structural fields.
+// `header` — the image to store; `frame` — the pinned header frame.
 void IsamIndex::store_header(const Header& header, std::size_t frame) {
     char* buffer = manager_.frame(frame).buffer;  // the pinned header frame
     write_u32(buffer, kMagicOffset, kIndexMagic);
@@ -140,6 +158,9 @@ void IsamIndex::store_header(const Header& header, std::size_t frame) {
     write_u32(buffer, kLastBlockOffset, header.last_block);
 }
 
+// Builds the header image from the members and writes it to block 0.
+// `error` — receives a named message on failure.
+// Returns true on success; false when block 0 cannot be pinned.
 bool IsamIndex::write_header(std::string& error) {
     std::size_t frame = 0;
     if (!manager_.pin(file_, 0, frame, error)) {
@@ -158,6 +179,11 @@ bool IsamIndex::write_header(std::string& error) {
     return true;
 }
 
+// Loads the header image from block 0; names longer than the on-disk
+// maximum are left empty rather than trusted.
+// `header` — receives the loaded fields; `error` — receives a named
+// message on failure.
+// Returns true on success; false when block 0 cannot be pinned.
 bool IsamIndex::read_header(Header& header, std::string& error) {
     std::size_t frame = 0;
     if (!manager_.pin(file_, 0, frame, error)) {
@@ -187,6 +213,12 @@ bool IsamIndex::read_header(Header& header, std::string& error) {
 
 // --- lifecycle ----------------------------------------------------------------
 
+// Creates a fresh, empty index file: refuses anything but a missing or
+// zero-block path, formats the empty header state, allocates block 0,
+// and leaves the index open.
+// `path` — the index file to create; `error` — receives a named
+// message on failure.
+// Returns true with the index open; false with the file closed again.
 bool IsamIndex::create(const std::string& path, std::string& error) {
     error.clear();
     if (open_) {
@@ -367,6 +399,13 @@ bool IsamIndex::build_separator_level(std::vector<FirstKey> level,
     return build_separator_level(std::move(next_level), error);
 }
 
+// The bulk build as four named phases (D5): create the file, encode
+// and sort, fill the leaves, link the chain, grow separator levels —
+// then the header. The close-on-failure dance lives here, once (D8).
+// `path` — the index file to create; `entries` — the (value, rid)
+// pairs, any order; `error` — receives a named message on failure.
+// Returns true with the index open and entry_count_ set; false with
+// the index closed again.
 bool IsamIndex::build(const std::string& path,
                       const std::vector<std::pair<tuple::Column, Rid>>& entries,
                       std::string& error) {
@@ -395,6 +434,14 @@ bool IsamIndex::build(const std::string& path,
     return true;
 }
 
+// Opens an existing index file: probes read-only (a missing path must
+// be reported as such, not created), then validates the header's magic,
+// key type and width, and table and column names against the bound
+// schema before adopting the header state.
+// `path` — the index file to open; `error` — receives a named message
+// on failure.
+// Returns true with the header state loaded; false with the file
+// closed again.
 bool IsamIndex::open(const std::string& path, std::string& error) {
     error.clear();
     if (open_) {
@@ -462,6 +509,11 @@ bool IsamIndex::open(const std::string& path, std::string& error) {
     return true;
 }
 
+// Flushes and closes this index's file, then resets every piece of
+// in-memory state.
+// `error` — receives a named message on failure.
+// Returns true on success; false when the index is not open or the
+// underlying close fails.
 bool IsamIndex::close(std::string& error) {
     if (!open_) {
         error = "index is not open";
@@ -480,6 +532,11 @@ bool IsamIndex::close(std::string& error) {
 
 // --- pin helpers ----------------------------------------------------------------
 
+// Pins `block` and binds a separator view to its frame.
+// `block` — the block id; `page` — receives the bound view; `frame` —
+// receives the pinned frame (the caller must unpin).
+// Returns true on success; false with `error` set and the frame
+// unpinned when the pin or the view's attach fails.
 bool IsamIndex::pin_separator(std::uint32_t block, SeparatorPage& page,
                               std::size_t& frame, std::string& error) {
     if (!manager_.pin(file_, block, frame, error)) {
@@ -493,6 +550,8 @@ bool IsamIndex::pin_separator(std::uint32_t block, SeparatorPage& page,
     return true;
 }
 
+// Pins `block` and binds a leaf view to its frame (same contract as
+// pin_separator).
 bool IsamIndex::pin_leaf(std::uint32_t block, LeafPage& page,
                          std::size_t& frame, std::string& error) {
     if (!manager_.pin(file_, block, frame, error)) {
@@ -506,6 +565,8 @@ bool IsamIndex::pin_leaf(std::uint32_t block, LeafPage& page,
     return true;
 }
 
+// Pins `block` and binds an overflow view to its frame (same contract
+// as pin_separator).
 bool IsamIndex::pin_overflow(std::uint32_t block, OverflowPage& page,
                              std::size_t& frame, std::string& error) {
     if (!manager_.pin(file_, block, frame, error)) {
@@ -521,6 +582,12 @@ bool IsamIndex::pin_overflow(std::uint32_t block, OverflowPage& page,
 
 // --- descent ---------------------------------------------------------------------
 
+// Descends from the root, crossing levels_ - 1 separator pages to land
+// on a leaf (levels_ == 1 means the root IS a leaf).
+// `key_bytes` — the encoded search key; `error` — receives a named
+// message on failure.
+// Returns the landing leaf's block id; kNoPage for an empty index or a
+// failed separator read.
 std::uint32_t IsamIndex::descend(const char* key_bytes,
                                  std::string& error) {
     if (root_ == kNoPage) {
@@ -618,6 +685,11 @@ bool IsamIndex::scan_leaf_chain(std::uint32_t block,
     return scan_leaf_chain(next_leaf, key_bytes, out, error);
 }
 
+// Equality lookup: encode the key, descend to the landing leaf, and
+// walk the leaf chain collecting matches.
+// `key` — the value to match; `out` — receives the rids (cleared
+// first); `error` — receives a named message on failure.
+// Returns true on success, including zero matches.
 bool IsamIndex::lookup(const tuple::Column& key, std::vector<Rid>& out,
                        std::string& error) {
     out.clear();
@@ -741,6 +813,13 @@ bool IsamIndex::scan_leaf_range(std::uint32_t block, RangeWalk& walk,
     return scan_leaf_range(next_leaf, walk, error);
 }
 
+// Range scan: encode the optional bounds, start at the leaf after the
+// last separator strictly below the lower bound (the first leaf for an
+// open lower bound), and walk the chain under the bounds.
+// `lo`, `hi` — the optional bounds with per-bound inclusivity.
+// `out` — receives the matching rids (cleared first).
+// `error` — receives a named message on failure.
+// Returns true on success, including an empty result.
 bool IsamIndex::range(const std::optional<RangeBound>& lo,
                       const std::optional<RangeBound>& hi,
                       std::vector<Rid>& out, std::string& error) {
@@ -793,6 +872,13 @@ bool IsamIndex::range(const std::optional<RangeBound>& lo,
 
 // --- insert -----------------------------------------------------------------------
 
+// Allocates the next dense block id (last_block_ + 1, never the
+// on-disk block count: dirty pages reach disk only on eviction/flush).
+// `block` — receives the new id; `frame` — receives the pinned frame
+// (the caller must unpin); `error` — receives a named message on
+// failure.
+// Returns true on success; false when the id range is exhausted or the
+// allocation fails.
 bool IsamIndex::alloc_next_block(std::uint32_t& block, std::size_t& frame,
                                  std::string& error) {
     // Pages are allocated densely and never removed, so the next id is
@@ -834,6 +920,12 @@ std::uint32_t IsamIndex::find_overflow_with_room(std::uint32_t block,
     return find_overflow_with_room(next, error);
 }
 
+// Enters one (key, rid) pair: an empty index grows its first leaf
+// (also the root); otherwise descend to the owning leaf and insert
+// sorted in place, or spill into its overflow chain when full.
+// `key` — the value to index; `rid` — the heap row address.
+// `error` — receives a named message on failure.
+// Returns true on success (entry_count_ grown, header rewritten).
 bool IsamIndex::insert(const tuple::Column& key, Rid rid, std::string& error) {
     if (!open_) {
         error = "index is not open";
@@ -845,8 +937,9 @@ bool IsamIndex::insert(const tuple::Column& key, Rid rid, std::string& error) {
     }
 
     // An empty index grows its first leaf; it is simultaneously the root
-    // (levels_ == 1). Leaves are otherwise frozen: the descent lands on
-    // the owning leaf and the entry spills into its overflow chain.
+    // (levels_ == 1). Existing leaves never split and separators stay
+    // frozen. Insert into the owning leaf while it has room; otherwise
+    // spill into its overflow chain.
     if (root_ == kNoPage) {
         std::size_t frame = 0;
         std::uint32_t block = 0;
@@ -1029,6 +1122,16 @@ bool IsamIndex::verify_leaf_chain(std::uint32_t block,
                              has_last || has_previous, walk, error);
 }
 
+// Full verification: walks the leaf chain and every overflow page,
+// checks per-page sortedness, leaf-chain key order, and every rid
+// against `occupied` (dangling entries named by key and row id), and
+// compares the walked total against the header.
+// `occupied` — callback judging whether an rid points at a live heap
+// row; `entry_count` — receives the walked total; `findings` —
+// receives one named string per problem (cleared first).
+// `error` — receives a named message on failure.
+// Returns true when the walk completed (findings may still be
+// non-empty); false when the index is not open or a page read fails.
 bool IsamIndex::verify(const std::function<bool(const Rid&)>& occupied,
                        std::size_t& entry_count,
                        std::vector<std::string>& findings,

@@ -8,5 +8,7 @@
     { "column_name": "pprice", "column_type": "Double", "size": 8 },
     { "column_name": "pmaterial", "column_type": "String", "size": 20 }
   ],
-  "indexes": []
+  "indexes": [
+    { "name": "parts_partid", "column": "partid" }
+  ]
 }

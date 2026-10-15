@@ -157,8 +157,13 @@ exercise adds it, it leaves gaps, never compacts.
 - **Planner** (`Planner`): flattens top-level AND conjuncts (moving the
   bound nodes). `column op literal` (or flipped) on an indexed column
   yields bounds — equality a point, `< <= > >=` open/closed — and
-  conjuncts on the same column intersect (an empty intersection is an
-  index scan that answers nothing). Everything else — OR at the top
+  conjuncts on the same column intersect by tightening only: bounds
+  move inward, never outward, and equality tightens both sides at once
+  (`id > 2 AND id = 1` is an index scan that answers nothing; an equal
+  value never turns an exclusive bound inclusive). A literal of the
+  other numeric type (`id = 2.0` on an int column, `d > 2` on a double)
+  cannot be encoded as a key of the column's type, so it stays residual
+  instead of failing key encoding. Everything else — OR at the top
   level, `<>`, non-literal sides, unindexed columns — becomes residual,
   evaluated per fetched row. With no usable conjunct the plan is a heap
   scan. The planner is also the oracle's seam: in suppressed mode it
@@ -172,7 +177,11 @@ exercise adds it, it leaves gaps, never compacts.
   in-session index registration), INSERT (validate every row first —
   all-or-nothing per statement — then heap insert, then each index),
   SELECT (bind, plan, execute index or heap path, residual filter,
-  project). Refusals for the wider language name their feature.
+  project; a string bound wider than the column is cut to the column
+  width with the bound adjusted — `k > 'PRXX'` scans as `k > 'PRX'`,
+  `k < 'PRXX'` as `k <= 'PRX'` — so the index path answers what the
+  heap path answers). Refusals for the wider language name their
+  feature.
 
 Physical naming: a table's data file is `data/<table>.tbl` (the
 `data` directory is created on demand); indexes sit beside it as
@@ -215,6 +224,36 @@ records): refused before any write. Where the per-row insert path costs
 228.8 s per 100k rows (its chain walk is quadratic), the bulk load takes
 0.2 s — the load this tool exists for.
 
+### Using it
+
+The call is `tools::bulk_load(path, schema, count, generator, stats,
+error)`. `generator` is called once per row index `0..count-1` in
+order: it fills the tuple and returns true, or returns false with a
+named error — which fails the whole load and names the row index.
+`stats` reports records, data pages, and the per-page capacity K. The
+one hard constraint is the bootstrap-before-open rule above: the tool
+writes behind any pool's back, so it must run before a BufferManager
+opens the path — in parts_bench, immediately after CREATE TABLE, while
+the session has never touched `data/parts.tbl`.
+
+Two routes to a loaded table, by scale:
+
+- **The session CLI's `bulk` escape hatch** (`bulk <table> <count>
+  <file>`) generates rows with `schema::generate_tuples` (seed 42,
+  numbering continuing after the existing records) and pushes them
+  through `Executor::insert_into` one row at a time — the fresh-table
+  case is why `count_rows` tolerates a missing file and `insert_into`
+  creates it. Indexes are maintained per insert; convenient at escape-
+  hatch scale, quadratic beyond it.
+- **The tool itself** for real volumes: generate the rows (or stream
+  them through a `RowGenerator`), call `bulk_load`, then let the first
+  open — a SELECT, a scan, a `CREATE INDEX` — pick the file up as an
+  ordinary heap.
+
+Indexing comes after loading either way: `CREATE INDEX` builds over the
+rows already in the file, so the sanctioned order is CREATE TABLE, bulk
+load, CREATE INDEX — exactly the benchmark's sequence.
+
 ## parts_bench — the index-vs-heap benchmark
 
 One executable, one run, one report. The argument surface is `--rows N`
@@ -230,8 +269,9 @@ Q2 (`pprice >= 1.0 AND pprice <= 10.0`) timed on the heap path — the
 run fails if either announces anything else — then `CREATE INDEX` on
 each query's column (build timed) and the same parsed statements
 re-run on the index path. Both paths' answer sets are compared (sorted,
-all six columns) and must be identical; the report prints the four
-query times, both build times, the load time, and the speedups. The
+all six columns) and must be identical; the report prints each query's
+full text (the exact statements measured), the four query times, both
+build times, the load time, and the speedups. The
 serialization round-trip self-check and the data fingerprint (two runs
 with the same count must match) pin the generator's contract.
 
@@ -248,19 +288,22 @@ place of a load time.
 
 ## main.cpp — the check suite
 
-Five suites, 1155 checks: the vendored ex11 storage suite (344), the
+Five suites, 1175 checks: the vendored ex11 storage suite (344), the
 vendored ex12 sql suite (278, including the new index-statement checks),
-the index-module suite (codec, page views, header identification, build,
-duplicates spanning leaves, ranges, overflow chaining with byte-frozen
-separators, verify with seeded corruption, persistence), the exec-layer
-suite (bind-time refusals, evaluation semantics, access-path markers,
-the DDL seam, INSERT all-or-nothing, index-file rebuild, DROP TABLE
-completeness), and the bulk-loader suite (fill/link read-back,
-row-id parity, the tool-vs-insert differential oracle, refusal rules,
-empty and zero-record loads, generator-failure naming) — ending in the
-**differential oracle**: 500 random rows, two indexes, 300 random
-predicates, each SELECT executed with the index allowed and suppressed,
-both answers required to be the same set of rows.
+the index-module suite (441: codec, page views, header identification,
+build, duplicates spanning leaves, ranges, overflow chaining with
+byte-frozen separators, verify with seeded corruption, persistence), the
+exec-layer suite (81: bind-time refusals, evaluation semantics,
+access-path markers, the DDL seam, INSERT all-or-nothing, index-file
+rebuild, DROP TABLE completeness, the planner's bound edge cases —
+bounds only tighten, mismatched numeric literals stay residual, wide
+string bounds are cut, each run on both paths against a known row
+count — and the **differential oracle**: 500 random rows, two indexes,
+300 random predicates, each SELECT executed with the index allowed and
+suppressed, both answers required to be the same set of rows), and the
+bulk-loader suite (31: fill/link read-back, row-id parity, the
+tool-vs-insert differential oracle, refusal rules, empty and
+zero-record loads, generator-failure naming).
 
 ## Design decisions worth knowing
 
