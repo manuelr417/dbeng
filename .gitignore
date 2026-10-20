@@ -28,5 +28,7 @@
 # macOS metadata
 **/.DS_Store
 
-# Runtime table data and index scratch
-**/data/
+# Runtime table data and index scratch: contents never tracked, but the
+# directory ships (with a .gitkeep) because the tools expect it.
+**/data/**
+!**/data/.gitkeep
