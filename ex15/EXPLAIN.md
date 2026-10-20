@@ -210,9 +210,11 @@ aggregate select item — the implicit single group) and routes to
    distinct keys separate within `ceil(32 / log₂K)` levels (after that
    every pair differs in some bit some level slices on), so one
    duplicate-flooded group is the only way a partition stays over
-   budget — and that one group cannot overflow. A depth cap beyond the
-   bound (16, safely past `ceil(32/1)` for K = 2) is a named error:
-   `grouped execution exceeded the spill depth cap`. Each run is
+   budget — and that one group cannot overflow. The depth cap is that
+   bound itself, derived from K: a level whose slice would start at or
+   past bit 32 (`L·log₂K ≥ 32`) is a named error,
+   `grouped execution exceeded the spill depth cap` — so K = 2 gets its
+   full 32 levels and no shift ever exceeds the hash width. Each run is
    consumed (read, deleted) before its recursion, so the file set stays
    small.
 5. **Drain and project.** Every group — in-memory buckets in order, or

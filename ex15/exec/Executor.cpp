@@ -19,10 +19,10 @@ namespace exec {
 
 namespace {
 
-// The spill recursion's belt-and-braces cap: distinct keys separate
-// within ceil(32 / log2 K) levels (design D6), so 16 is safely beyond
-// the bound for every power-of-two fan-out down to K = 2.
-constexpr std::size_t kGroupSpillDepth = 16;
+// The group-key hash width: level L of the spill recursion routes by
+// bits [L·log2K, (L+1)·log2K), so ceil(32 / log2 K) levels exhaust it
+// (design D6) — the recursion's depth cap, derived from K, not fixed.
+constexpr std::size_t kGroupHashBits = 32;
 
 // SQL-created static hash indexes use this fixed bucket count (design
 // D4): the teaching-scale directory, 2,720 direct slots before any
@@ -1048,8 +1048,7 @@ bool Executor::handle_grouped_select(const sql::SelectStatement& statement,
 
     bool spilled = false;
     if (!aggregate_records(records, schema, specs, group.key_columns, items,
-                           having, statement.from.name, /*level=*/0,
-                           /*depth=*/kGroupSpillDepth, spilled,
+                           having, statement.from.name, /*level=*/0, spilled,
                            result.rows.rows, error)) {
         return false;
     }
@@ -1113,8 +1112,7 @@ bool Executor::aggregate_records(
     const std::vector<group::AggregateSpec>& specs,
     const std::vector<std::size_t>& key_columns,
     const std::vector<BoundExprPtr>& items, const BoundExprPtr& having,
-    const std::string& table, std::size_t level, std::size_t depth,
-    bool& spilled, std::vector<std::vector<Value>>& out_rows,
+    const std::string& table, std::size_t level, bool& spilled, std::vector<std::vector<Value>>& out_rows,
     std::string& error) {
     // The common case: fold everything into one in-memory table.
     group::GroupTable table_agg(specs, group_buckets_, group_budget_);
@@ -1135,8 +1133,8 @@ bool Executor::aggregate_records(
             // Restart on overflow (design D6): the partial table dies
             // with this frame; the record stream restarts into runs.
             return spill_records(records, schema, specs, key_columns, items,
-                                 having, table, level, depth, spilled,
-                                 out_rows, error);
+                                 having, table, level, spilled, out_rows,
+                                 error);
         }
     }
     // Empty input with no GROUP BY: one identity row (design D8).
@@ -1156,16 +1154,8 @@ bool Executor::spill_records(
     const std::vector<group::AggregateSpec>& specs,
     const std::vector<std::size_t>& key_columns,
     const std::vector<BoundExprPtr>& items, const BoundExprPtr& having,
-    const std::string& table, std::size_t level, std::size_t depth,
-    bool& spilled, std::vector<std::vector<Value>>& out_rows,
+    const std::string& table, std::size_t level, bool& spilled, std::vector<std::vector<Value>>& out_rows,
     std::string& error) {
-    if (depth == 0) {
-        // Beyond ceil(32 / log2 K) levels distinct keys must have
-        // separated (design D6's termination argument); reaching the cap
-        // means something is wrong, so name it.
-        error = "grouped execution exceeded the spill depth cap";
-        return false;
-    }
     const std::size_t partitions = group_partitions_;
     if (partitions < 2 || (partitions & (partitions - 1)) != 0) {
         error = "the group partition count must be a power of two";
@@ -1174,6 +1164,14 @@ bool Executor::spill_records(
     std::size_t bits = 0;
     for (std::size_t k = partitions; (k >>= 1) > 0;) {
         ++bits;
+    }
+    if (level * bits >= kGroupHashBits) {
+        // Every hash bit has been sliced: distinct keys must have
+        // separated by now (design D6's termination argument), and the
+        // level shift below would exceed the hash width. Reaching this
+        // means something is wrong, so name it.
+        error = "grouped execution exceeded the spill depth cap";
+        return false;
     }
     const auto run_number = [&](std::size_t p) {
         return level * partitions + p;  // level and partition in one number
@@ -1272,8 +1270,8 @@ bool Executor::spill_records(
         }
         std::remove(path.c_str());  // consumed: deleted at drain (D7)
         if (!aggregate_records(partition_records, schema, specs, key_columns,
-                               items, having, table, level + 1, depth - 1,
-                               spilled, out_rows, error)) {
+                               items, having, table, level + 1, spilled,
+                               out_rows, error)) {
             cleanup_runs();
             return false;
         }

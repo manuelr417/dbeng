@@ -663,6 +663,36 @@ int run_group_checks() {
             check(count_spill_files() == 0,
                   "no run files survive the multi-level run");
 
+            // The depth cap follows K: integer keys hash to themselves,
+            // so 0 and 65536 agree on bits 0..15 and first separate at
+            // level 16 with K = 2 — past the old fixed cap of 16 levels.
+            check(run_sql(executor, "CREATE TABLE deept (k INTEGER, v INT)",
+                          result, error) &&
+                      run_sql(executor,
+                              "INSERT INTO deept VALUES (0, 1), (65536, 2), "
+                              "(0, 3)",
+                              result, error),
+                  "the deep-split table is created and filled");
+            executor.set_group_budget(1);
+            const bool split_ok = run_sql(
+                executor, "SELECT k, SUM(v) FROM deept GROUP BY k", result,
+                error);
+            std::vector<std::pair<int, int>> split_answer;
+            if (split_ok) {
+                for (const std::vector<exec::Value>& row : result.rows.rows) {
+                    split_answer.emplace_back(std::get<int>(row[0]),
+                                              std::get<int>(row[1]));
+                }
+                std::sort(split_answer.begin(), split_answer.end());
+            }
+            check(split_ok &&
+                      split_answer == std::vector<std::pair<int, int>>{
+                                          {0, 4}, {65536, 2}},
+                  "keys first split at level 16 answer with K = 2 (" +
+                      error + ")");
+            check(count_spill_files() == 0,
+                  "no run files survive the 17-level run");
+
             // Restore the production defaults.
             executor.set_group_budget(100000);
             executor.set_group_partitions(8);

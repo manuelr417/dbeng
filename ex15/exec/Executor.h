@@ -181,15 +181,16 @@ private:
     // then one value per aggregate slot that takes an argument). Tries
     // the in-memory table first; on budget exhaustion restarts the
     // record stream into K partition runs one level deeper (design D6).
-    // `level` selects the hash-bit slice; `depth` caps the recursion;
-    // `spilled` rises once any level spilled.
+    // `level` selects the hash-bit slice (and, once the slices exhaust
+    // the hash, caps the recursion); `spilled` rises once any level
+    // spilled.
     bool aggregate_records(const std::vector<std::vector<Value>>& records,
                            const schema::TableSchema& schema,
                            const std::vector<group::AggregateSpec>& specs,
                            const std::vector<std::size_t>& key_columns,
                            const std::vector<BoundExprPtr>& items,
                            const BoundExprPtr& having, const std::string& table,
-                           std::size_t level, std::size_t depth, bool& spilled,
+                           std::size_t level, bool& spilled,
                            std::vector<std::vector<Value>>& out_rows,
                            std::string& error);
 
@@ -201,7 +202,7 @@ private:
                        const std::vector<std::size_t>& key_columns,
                        const std::vector<BoundExprPtr>& items,
                        const BoundExprPtr& having, const std::string& table,
-                       std::size_t level, std::size_t depth, bool& spilled,
+                       std::size_t level, bool& spilled,
                        std::vector<std::vector<Value>>& out_rows,
                        std::string& error);
 
