@@ -5,10 +5,12 @@ heap over a buffer pool), the ex12 SQL front-end, the ISAM index, and
 the exec layer that binds, evaluates, plans, and dispatches — with the
 engine's second index structure: an **extensible hash index** (lecture
 11) behind the `USING HASH | ISAM` clause, with entry erase on both
-index kinds and a third announced access path. Beside it, as a
-module-level addition exercised by its own check suite, sits the
-lecture's baseline scheme: a **static hash index** with a fixed bucket
-count. Plain C++20, zero dependencies, single-threaded by contract.
+index kinds and a third announced access path, then the module-level
+**static hash index** — the lecture's fixed-N baseline — wired into the
+same clause as `USING STATIC HASH`: a fourth announced access path, its
+own file extension and catalog kind, erase fan-out, verification, and
+lazy rebuild. Plain C++20, zero dependencies, single-threaded by
+contract.
 
 Every layer reports failures the ex11 way: a `bool` return plus an
 `error` string out-parameter, cleared on entry. Errors are named; the
@@ -29,19 +31,20 @@ the new hash suite (`check_hash.cpp`).
 
 ## sql/ — the USING seam
 
-The keyword table gains `INDEX`, `USING`, `HASH`, and `ISAM`
+The keyword table gains `INDEX`, `USING`, `HASH`, `ISAM`, and `STATIC`
 (sql/Token.h). `Ast.h` gains
 `CreateIndexStatement{index_name, table, column, using_kind, has_using}`
 — `using_kind` defaults to Hash, and `has_using` records whether the
 statement spelled the clause out (the printer renders it only when
 explicit) — and `DropIndexStatement{index_name}`. The parser's optional
-`USING (HASH|ISAM)` after the closing paren is five lines of cursor
-plumbing; anything else there is a parse error. `AstPrinter` renders
-both statements for round-trips; `AstDraw` draws them, showing the kind
-only when explicit. The rest of the grammar — joins, GROUP BY, ORDER
-BY, LIMIT, aggregates, UPDATE, DELETE — still parses: the *executor*
-refuses those by name, so the subset contract lives in the dispatcher,
-not the grammar.
+`USING (HASH|ISAM|STATIC HASH)` after the closing paren is a few lines
+of cursor plumbing — `STATIC HASH` is the one two-token kind, so a bare
+`STATIC` or a `STATIC ISAM` is a named parse error; anything else there
+is a parse error. `AstPrinter` renders both statements for round-trips;
+`AstDraw` draws them, showing the kind only when explicit. The rest of
+the grammar — joins, GROUP BY, ORDER BY, LIMIT, aggregates, UPDATE,
+DELETE — still parses: the *executor* refuses those by name, so the
+subset contract lives in the dispatcher, not the grammar.
 
 ## schema/ — the catalog writer (the DDL seam)
 
@@ -50,9 +53,10 @@ both with the index kind:
 
 - The catalog JSON's optional `"indexes"` array holds
   `{"name", "column", "kind"}` objects; `kind` is optional and absent
-  means `"isam"` — ex13-era catalogs load unchanged. The loader refuses
-  duplicate index names, empty names, unknown kinds (naming the bad
-  value), and unknown keys, and stays all-or-nothing.
+  means `"isam"` — ex13-era catalogs load unchanged. The three kinds
+  are `"hash"`, `"isam"`, and `"static hash"` (the SQL spelling). The
+  loader refuses duplicate index names, empty names, unknown kinds
+  (naming the bad value), and unknown keys, and stays all-or-nothing.
 - `save_table_schema(path, schema, indexes, error)` validates first (no
   empty table name, no empty columns, no unnamed/duplicate indexes, no
   index naming an unknown column or carrying an unknown kind), then
@@ -303,26 +307,18 @@ refusal.
   division and modulo by zero are named runtime errors; AND/OR
   short-circuit.
 - **Planner** (`Planner`): flattens top-level AND conjuncts (moving the
-  bound nodes). `column op literal` (or flipped) on an indexed column
-  yields bounds — equality a point, `< <= > >=` open/closed — and
-  conjuncts on the same column intersect (an empty intersection is an
-  index scan that answers nothing). Everything else — OR at the top
-  level, `<>`, non-literal sides, unindexed columns — becomes residual,
-  evaluated per fetched row. With no usable conjunct the plan is a heap
-  scan. The planner is also the oracle's seam: in suppressed mode it
-  sees no indexes, so every conjunct stays residual and the heap path
-  runs.
-- **Planner** (`Planner`): flattens top-level AND conjuncts (moving the
-  bound nodes). An equality `column = literal` (or flipped) on a column
-  with a **hash** index claims the hash scan — the first equality
+  bound nodes). An equality `column = literal` (or flipped) claims a
+  point scan for its column — preferring a **hash** index, then a
+  **static hash** index, then an **ISAM** index — the first equality
   wins, later ones filter the claimed point's rows as residual.
   Otherwise `column op literal` on a column with an **ISAM** index
   yields bounds — equality a point, `< <= > >=` open/closed — and
   conjuncts on the same column intersect (an empty intersection is an
-  index scan that answers nothing). A range never selects the hash
-  path — hash answers equality only — so a range on a hash-only column
-  is residual. With both kinds on the column, an equality prefers the
-  hash and a range-only conjunct set takes the ISAM scan. Everything
+  index scan that answers nothing). A range never selects the hash or
+  static path — both answer equality only — so a range on a column with
+  only those kinds is residual. With several kinds on the column, an
+  equality prefers the hash, then the static scan, then the ISAM scan,
+  and a range-only conjunct set takes the ISAM scan. Everything
   else — OR at the top level, `<>`, non-literal sides, unindexed
   columns — becomes residual, evaluated per fetched row. With no
   usable conjunct the plan is a heap scan. The planner is also the
@@ -330,22 +326,29 @@ refusal.
   one kind at a time (the oracle's per-path runs).
 - **Executor** (`Executor`): the dispatcher and the session state — the
   buffer manager reference, the catalog cache, the file table (a path
-  maps to an open `HeapFile` plus its open indexes of both kinds).
+  maps to an open `HeapFile` plus its open indexes of all three kinds).
   Handlers: CREATE/DROP TABLE (catalog writer + file lifecycle), 
   CREATE/DROP INDEX (catalog `indexes` array + build/erase, one index
   per column and kind, in-session index registration), INSERT (validate
   every row first — all-or-nothing per statement — then heap insert,
   then each index through one kind-dispatching seam), erase_row (read
   the row, erase the heap slot, then every index), SELECT (bind, plan,
-  execute hash, index, or heap path, residual filter, project).
-  Refusals for the wider language name their feature.
+  execute hash, static, index, or heap path, residual filter, project).
+  Refusals for the wider language name their feature. Session teardown
+  closes the index files too — index pages reach disk only on eviction
+  or close, so a session index must be closed for its file to be
+  complete on disk (the same discipline the drop paths follow before
+  removing an index file).
 
 Physical naming: a table's data file is `data/<table>.tbl` (the
 `data` directory is created on demand); indexes sit beside it as
-`data/<table>.tbl.<column>.idx` (ISAM) or
-`data/<table>.tbl.<column>.hdx` (hash). Opening a data file lazily
-rebuilds any declared index file that is missing, with its catalog
-kind. Files bind to the table they were first used with (ex11's rule).
+`data/<table>.tbl.<column>.idx` (ISAM),
+`data/<table>.tbl.<column>.hdx` (hash), or
+`data/<table>.tbl.<column>.shdx` (static hash). Opening a data file
+lazily rebuilds any declared index file that is missing, with its
+catalog kind — a SQL-created static index builds with a fixed default
+bucket count (8). Files bind to the table they were first used with
+(ex11's rule).
 
 ## ex14_cli — the session CLI
 
@@ -421,9 +424,10 @@ place of a load time.
 
 ## main.cpp — the check suite
 
-Seven suites: the vendored ex11 storage suite (351, with the
-catalog-kind checks), the vendored ex12 sql suite (291, including the
-USING-clause checks), the ISAM-module suite (465 — codec, page views,
+Seven suites: the vendored ex11 storage suite (354, with the
+catalog-kind checks including the static kind), the vendored ex12 sql
+suite (298, including the USING-clause checks and the two-token STATIC
+HASH kind), the ISAM-module suite (465 — codec, page views,
 header identification, build, duplicates spanning leaves, ranges,
 overflow chaining with byte-frozen separators, erase with byte-frozen
 separators and persistence, verify with seeded corruption,
@@ -437,16 +441,18 @@ self-identification including the extensible-file refusal, modulo
 routing with congruent-key collisions, duplicate floods into overflow
 chains with the bucket count fixed, build against per-entry inserts,
 erase across bucket and overflow, verify with seeded corruption),
-the exec-layer suite (85 — bind-time refusals, evaluation
+the exec-layer suite (103 — bind-time refusals, evaluation
 semantics, kind-aware access-path markers, planner routing rules, the
-DDL seam, INSERT all-or-nothing, erase_row fan-out, index-file
-rebuild, DROP TABLE completeness), and the bulk-loader suite (31 —
+DDL seam across all three kinds, INSERT all-or-nothing, erase_row
+fan-out, index-file rebuild, DROP TABLE completeness, session teardown
+closing index files), and the bulk-loader suite (31 —
 fill/link read-back, row-id parity, the tool-vs-insert differential
 oracle, refusal rules, empty and zero-record loads, generator-failure
-naming) — ending in the **differential oracle**: 500 random rows, four
-indexes (both kinds on each of two columns), 300 random predicates,
-each SELECT executed once per available path — both kinds, hash only,
-ISAM only, heap — all four answers required to be the same set of rows.
+naming) — ending in the **differential oracle**: 500 random rows, five
+indexes (all three kinds on one column, hash and ISAM on the other),
+300 random predicates, each SELECT executed once per available path —
+all kinds, each kind suppressed in turn, static only, heap — every run
+required to return the same set of rows.
 
 ## Design decisions worth knowing
 

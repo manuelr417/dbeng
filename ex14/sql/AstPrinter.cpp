@@ -227,8 +227,9 @@ std::string print(const Statement& statement) {
             std::string text = "CREATE INDEX " + create.index_name + " ON " +
                                create.table + " (" + create.column + ")";
             if (create.has_using) {
-                text += create.using_kind == IndexKind::Hash ? " USING HASH"
-                                                             : " USING ISAM";
+                text += create.using_kind == IndexKind::Hash   ? " USING HASH"
+                        : create.using_kind == IndexKind::Isam ? " USING ISAM"
+                                                               : " USING STATIC HASH";
             }
             return text;
         }

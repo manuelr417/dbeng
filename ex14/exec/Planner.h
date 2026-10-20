@@ -2,18 +2,19 @@
 
 // Planner — picks the access path for one SELECT's WHERE clause. The
 // rule set (design D8): flatten top-level AND conjuncts; an equality
-// conjunct `column = literal` (or flipped) whose column carries a HASH
-// index claims the hash scan — the first equality wins, later ones
-// filter as residual. Otherwise conjuncts of the form `column op
-// literal` whose column carries an ISAM index yield bounds — equality a
-// point, < <= > >= open or closed bounds; conjuncts on the same column
-// intersect (an empty intersection stays an index scan that answers
-// nothing). A range never selects the hash path — hash answers equality
-// only. Every other conjunct — OR anywhere at the top level,
-// non-literal sides, unindexed columns — becomes residual, evaluated
-// per fetched row. When no conjunct is indexable the plan is a heap
-// scan. Correctness never depends on the choice: both paths must
-// answer identically, which the check suite's oracle enforces.
+// conjunct `column = literal` (or flipped) claims a point scan for its
+// column — preferring a HASH index, then a STATIC hash index, then an
+// ISAM index — the first equality wins, later ones filter as residual.
+// Otherwise conjuncts of the form `column op literal` whose column
+// carries an ISAM index yield bounds — equality a point, < <= > >= open
+// or closed bounds; conjuncts on the same column intersect (an empty
+// intersection stays an index scan that answers nothing). A range never
+// selects the hash or static path — both answer equality only. Every
+// other conjunct — OR anywhere at the top level, non-literal sides,
+// unindexed columns — becomes residual, evaluated per fetched row. When
+// no conjunct is indexable the plan is a heap scan. Correctness never
+// depends on the choice: every path must answer identically, which the
+// check suite's oracle enforces.
 
 #include "exec/Binder.h"
 #include "schema/TableSchema.h"
@@ -46,7 +47,8 @@ struct IndexBounds {
 struct ScanPlan {
     bool use_index = false;                 // the ISAM path
     bool use_hash = false;                  // the hash path (equality point)
-    IndexBounds bounds;                     // valid when use_index or use_hash
+    bool use_static = false;                // the static path (equality point)
+    IndexBounds bounds;                     // valid when a path was chosen
     std::vector<BoundExprPtr> residual;     // evaluated per fetched row
 };
 

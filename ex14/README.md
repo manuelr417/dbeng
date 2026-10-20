@@ -104,7 +104,7 @@ and closes everything once — exit code 1 only if a flush fails.
 |---|---|
 | `CREATE TABLE t (col type, ...)` | types: `INTEGER`/`INT` (4 bytes), `VARCHAR(n)`, `DOUBLE` (8). Writes `tablecatalog/t.json` through the catalog writer. |
 | `DROP TABLE t` | removes the catalog, the data file `data/t.tbl`, and every index file. |
-| `CREATE INDEX name ON t (col) [USING HASH \| ISAM]` | one index per column and kind; the kind defaults to HASH. Builds over the table's current rows and records itself (with its kind) in the catalog. |
+| `CREATE INDEX name ON t (col) [USING HASH \| ISAM \| STATIC HASH]` | one index per column and kind (three kinds); the kind defaults to HASH. Builds over the table's current rows and records itself (with its kind) in the catalog. SQL-created static hash indexes use a fixed default bucket count. |
 | `DROP INDEX name` | erases the index file and the catalog entry. |
 | `INSERT INTO t VALUES (...), ...` | all-or-nothing per statement; the heap row lands first, then every index of the file (both kinds). |
 | `SELECT cols FROM t WHERE expr` | single table; projection is `*` or plain columns (an alias may rename one); WHERE is the full expression language. |
@@ -121,11 +121,16 @@ Every SELECT announces its path:
   hash index, pinned to a literal (`pid = 42`); remaining conjuncts
   filter the fetched rows. A range never takes this path — hash answers
   equality only.
+- `(via static scan)` — an equality on a column with a static hash
+  index, pinned to a literal; remaining conjuncts filter the fetched
+  rows. A range never takes this path — the static index answers
+  equality only.
 - `(via index scan)` — an equality or AND-combined range on a column
   with an ISAM index, pinned to literal bounds (`pid = 42`, `pid > 10
   AND pid < 50`); remaining conjuncts filter the fetched rows. With
-  both kinds on the column, an equality prefers the hash and a
-  range-only conjunct set takes the ISAM scan.
+  several kinds on the column, an equality prefers the hash, then the
+  static scan, then the ISAM scan; a range-only conjunct set takes the
+  ISAM scan.
 - `(via heap scan)` — anything else, including any top-level `OR`.
 
 The choice never changes the answer: every path returns the same rows
@@ -150,7 +155,7 @@ is read before the statement type-checks.
 | `seek` | `seek <table> <file> <page> <slot>...` — batch read |
 | `bulk` | `bulk <table> <count> <file>` — generated rows, numbering continuing after the existing records, indexes maintained |
 | `delrow` | `delrow <table> <file> <page> <slot>` — erases one record: the heap slot first, then every index of the file |
-| `checkindex` | `checkindex <table> <file>` — verifies every declared index (both kinds): entry counts, dangling row ids, ISAM key order, hash placement |
+| `checkindex` | `checkindex <table> <file>` — verifies every declared index (all three kinds): entry counts, dangling row ids, ISAM key order, hash and static-hash placement |
 | `help` | prints the SQL and escape-hatch summary |
 | `quit` | flushes and closes the session |
 
@@ -162,9 +167,11 @@ A `<file>` argument with no `/` resolves inside `data/` and gains the
 
 A SQL table's data file is `data/<table>.tbl` (the `data` directory is
 created on demand); its index files sit beside it —
-`data/<table>.tbl.<column>.idx` for ISAM and
-`data/<table>.tbl.<column>.hdx` for hash. Opening a data file builds
-any catalog-declared index file that is missing (lazy rebuild, with its
+`data/<table>.tbl.<column>.idx` for ISAM,
+`data/<table>.tbl.<column>.hdx` for hash, and
+`data/<table>.tbl.<column>.shdx` for static hash. Opening a data file
+builds any catalog-declared index file that is missing (lazy rebuild,
+with its
 catalog kind). The escape hatches keep ex11's arbitrary-path behavior.
 
 ## Running the parts benchmark

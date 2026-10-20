@@ -255,8 +255,13 @@ private:
                 statement->using_kind = IndexKind::Hash;
             } else if (accept(TokenType::Isam)) {
                 statement->using_kind = IndexKind::Isam;
+            } else if (accept(TokenType::Static)) {
+                if (!expect(TokenType::Hash, "HASH after STATIC")) {
+                    return nullptr;
+                }
+                statement->using_kind = IndexKind::Static;
             } else {
-                fail("expected HASH or ISAM after USING");
+                fail("expected HASH, ISAM, or STATIC HASH after USING");
                 return nullptr;
             }
             statement->has_using = true;

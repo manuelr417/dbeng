@@ -73,7 +73,7 @@ struct DropTableStatement : Statement {
 
 // The index structure a CREATE INDEX asks for: HASH (the default when
 // the USING clause is absent) or ISAM.
-enum class IndexKind { Hash, Isam };
+enum class IndexKind { Hash, Isam, Static };
 
 struct CreateIndexStatement : Statement {
     std::string index_name;

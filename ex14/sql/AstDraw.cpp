@@ -407,7 +407,9 @@ std::string draw(const Statement& statement) {
             column.label = "column";
             column.inline_text = create.column;
             kind.label = "using";
-            kind.inline_text = create.using_kind == IndexKind::Hash ? "HASH" : "ISAM";
+            kind.inline_text = create.using_kind == IndexKind::Hash   ? "HASH"
+                               : create.using_kind == IndexKind::Isam ? "ISAM"
+                                                                      : "STATIC HASH";
             sections.push_back(std::move(name));
             sections.push_back(std::move(table));
             sections.push_back(std::move(column));

@@ -362,6 +362,85 @@ int run_exec_checks() {
         check(fresh.close_all(error), "fresh session closed");
     }
 
+    // --- USING STATIC HASH: the third kind through the DDL seam ---
+    {
+        // Open the session file first: an index created while the data
+        // file is open builds immediately (otherwise the build defers
+        // to the next open).
+        check(run_sql(executor, "SELECT * FROM person", result, error) &&
+                  result.rows.rows.size() == 3,
+              "person is open when the static index is created");
+        check(run_sql(executor,
+                      "CREATE INDEX person_pid_static ON person (pid) "
+                      "USING STATIC HASH",
+                      result, error) &&
+                  contains(result.message, "person_pid_static"),
+              "CREATE INDEX USING STATIC HASH reports success");
+        std::vector<schema::TableIndex> indexes;
+        bool static_recorded = false;
+        check(executor.table("person", indexes, error) != nullptr &&
+                  indexes.size() == 2,
+              "the static index joins the hash one in the catalog");
+        for (const schema::TableIndex& declared : indexes) {
+            static_recorded =
+                static_recorded || declared.kind == "static hash";
+        }
+        check(static_recorded,
+              "the catalog records the static hash kind");
+        std::ifstream shdx("data/person.tbl.pid.shdx");
+        check(shdx.good(),
+              "the static index file sits beside the data file");
+
+        std::string dup_error;
+        check(!run_sql(executor,
+                       "CREATE INDEX static_again ON person (pid) "
+                       "USING STATIC HASH",
+                       result, dup_error) &&
+                  contains(dup_error, "one index per column"),
+              "a second static index of the same kind is refused");
+
+        // A deleted .shdx rebuilds at open, like the other kinds.
+        check(executor.close_all(error), "session closed for the static rebuild");
+        std::remove("data/person.tbl.pid.shdx");
+        exec::Executor fresh(manager);
+        check(run_sql(fresh, "SELECT * FROM person", result, error) &&
+                  result.rows.rows.size() == 3,
+              "the fresh session opens the table for the static rebuild");
+        std::ifstream rebuilt("data/person.tbl.pid.shdx");
+        check(rebuilt.good(), "a deleted static index file is rebuilt at open");
+        std::vector<std::string> report;
+        bool clean = false;
+        check(fresh.check_indexes("person", "data/person.tbl", report,
+                                  clean, error) &&
+                  clean && report.size() == 2,
+              "checkindex verifies the rebuilt static index clean");
+        check(fresh.close_all(error), "the static rebuild session closed");
+    }
+
+    // --- the static path is announced, and the hash is preferred ---
+    {
+        // person carries hash person_pid and static person_pid_static.
+        check(run_sql(executor, "SELECT * FROM person WHERE pid = 2", result,
+                      error) &&
+                  result.rows.access_path == "hash scan" &&
+                  result.rows.rows.size() == 1,
+              "with hash and static, an equality takes the hash scan");
+        executor.set_allow_hash(false);
+        check(run_sql(executor, "SELECT * FROM person WHERE pid = 2", result,
+                      error) &&
+                  result.rows.access_path == "static scan" &&
+                  result.rows.rows.size() == 1 &&
+                  std::get<int>(result.rows.rows[0][0]) == 2,
+              "equality on the static-indexed column takes the static scan");
+        check(run_sql(executor,
+                      "SELECT * FROM person WHERE pid > 1 AND pid < 3",
+                      result, error) &&
+                  result.rows.access_path == "heap scan" &&
+                  result.rows.rows.size() == 1,
+              "a range with only hash and static degrades to the heap");
+        executor.set_allow_hash(true);
+    }
+
     // --- 6.3. erase_row: heap erase fans out to every index ---
     {
         check(run_sql(executor, "CREATE TABLE delme (id INTEGER, tag "
@@ -376,8 +455,12 @@ int run_exec_checks() {
                   run_sql(executor,
                           "CREATE INDEX delme_id_isam ON delme (id) "
                           "USING ISAM",
+                          result, error) &&
+                  run_sql(executor,
+                          "CREATE INDEX delme_id_static ON delme (id) "
+                          "USING STATIC HASH",
                           result, error),
-              "delme table prepared with both index kinds");
+              "delme table prepared with all three index kinds");
         check(executor.erase_row("delme", "data/delme.tbl",
                                  heapfile::RowId{1, 2}, error),
               "erasing the row at (1,2) succeeds");
@@ -417,8 +500,8 @@ int run_exec_checks() {
         bool clean = false;
         check(executor.check_indexes("delme", "data/delme.tbl", report,
                                      clean, error) &&
-                  clean && report.size() == 2,
-              "checkindex reports both emptied indexes clean");
+                  clean && report.size() == 3,
+              "checkindex reports all three emptied indexes clean");
         check(run_sql(executor, "DROP TABLE delme", result, error),
               "delme dropped");
     }
@@ -476,33 +559,54 @@ int run_exec_checks() {
         };
         using Kind = sql::IndexKind;
         const std::vector<exec::CatalogIndex> hash_only = {{"h", 0, Kind::Hash}};
+        const std::vector<exec::CatalogIndex> static_only = {
+            {"s", 0, Kind::Static}};
         const std::vector<exec::CatalogIndex> isam_only = {{"i", 0, Kind::Isam}};
         const std::vector<exec::CatalogIndex> both = {{"h", 0, Kind::Hash},
                                                       {"i", 0, Kind::Isam}};
+        const std::vector<exec::CatalogIndex> hash_and_static = {
+            {"h", 0, Kind::Hash}, {"s", 0, Kind::Static}};
         exec::ScanPlan plan;
 
         check(plan_of("pid = 5", hash_only, plan) && plan.use_hash &&
-                  !plan.use_index && plan.bounds.index_name == "h" &&
+                  !plan.use_static && !plan.use_index &&
+                  plan.bounds.index_name == "h" &&
                   plan.bounds.lo && plan.bounds.hi &&
                   exec::compare_values(*plan.bounds.lo, exec::Value(5)) == 0 &&
                   exec::compare_values(*plan.bounds.hi, exec::Value(5)) == 0,
               "an equality on a hash-indexed column claims the hash scan");
+        check(plan_of("pid = 5", static_only, plan) && plan.use_static &&
+                  !plan.use_hash && !plan.use_index &&
+                  plan.bounds.index_name == "s" &&
+                  plan.bounds.lo && plan.bounds.hi &&
+                  exec::compare_values(*plan.bounds.lo, exec::Value(5)) == 0,
+              "an equality on a static-only column claims the static scan");
         check(plan_of("pid = 5", isam_only, plan) && plan.use_index &&
-                  !plan.use_hash && plan.bounds.index_name == "i" &&
+                  !plan.use_hash && !plan.use_static &&
+                  plan.bounds.index_name == "i" &&
                   plan.bounds.lo && plan.bounds.hi &&
                   exec::compare_values(*plan.bounds.lo, exec::Value(5)) == 0,
               "an equality on an ISAM-only column stays an index scan");
         check(plan_of("pid = 5", both, plan) && plan.use_hash &&
                   plan.bounds.index_name == "h",
               "with both kinds, an equality prefers the hash");
+        check(plan_of("pid = 5", hash_and_static, plan) && plan.use_hash &&
+                  plan.bounds.index_name == "h",
+              "with hash and static, an equality prefers the hash");
         check(plan_of("pid > 10 AND pid < 20", isam_only, plan) &&
-                  plan.use_index && !plan.use_hash && plan.bounds.lo &&
+                  plan.use_index && !plan.use_hash && !plan.use_static &&
+                  plan.bounds.lo &&
                   plan.bounds.hi && !plan.bounds.lo_inclusive &&
                   !plan.bounds.hi_inclusive,
               "an AND range on an ISAM column takes the index scan");
         check(plan_of("pid > 10", hash_only, plan) && !plan.use_hash &&
-                  !plan.use_index && plan.residual.size() == 1,
+                  !plan.use_static && !plan.use_index &&
+                  plan.residual.size() == 1,
               "a range on a hash-only column degrades to the heap");
+        check(plan_of("pid > 10", static_only, plan) && !plan.use_static &&
+                  !plan.use_hash && !plan.use_index &&
+                  plan.residual.size() == 1,
+              "a range on a static-only column degrades to the heap");
         check(plan_of("pid > 10", both, plan) && plan.use_index &&
                   !plan.use_hash && plan.bounds.index_name == "i",
               "with both kinds, a range takes the ISAM scan");
@@ -512,12 +616,16 @@ int run_exec_checks() {
         check(plan_of("pid = 5 AND pid = 9", hash_only, plan) &&
                   plan.use_hash && plan.residual.size() == 1,
               "a second equality on the hash column filters as residual");
+        check(plan_of("pid = 5 AND pid = 9", static_only, plan) &&
+                  plan.use_static && plan.residual.size() == 1,
+              "a second equality on the static column filters as residual");
         check(plan_of("pid = 1 OR city = 'PR'", both, plan) &&
-                  !plan.use_hash && !plan.use_index &&
+                  !plan.use_hash && !plan.use_static && !plan.use_index &&
                   plan.residual.size() == 1,
               "a top-level OR degrades to the heap");
         check(plan_of("city = 'PR'", hash_only, plan) && !plan.use_hash &&
-                  !plan.use_index && plan.residual.size() == 1,
+                  !plan.use_static && !plan.use_index &&
+                  plan.residual.size() == 1,
               "an equality on an unindexed column scans the heap");
     }
 
@@ -554,6 +662,10 @@ int run_exec_checks() {
                           "CREATE INDEX oracle_id_isam ON oracle (id) "
                           "USING ISAM",
                           result, error) &&
+                  run_sql(executor,
+                          "CREATE INDEX oracle_id_static ON oracle (id) "
+                          "USING STATIC HASH",
+                          result, error) &&
                   run_sql(executor, "CREATE INDEX oracle_score ON oracle "
                                     "(score)",
                           result, error) &&
@@ -561,7 +673,7 @@ int run_exec_checks() {
                           "CREATE INDEX oracle_score_isam ON oracle (score) "
                           "USING ISAM",
                           result, error),
-              "all four oracle indexes created");
+              "all five oracle indexes created");
 
         // Random predicates over both indexed columns, with and without
         // residual conjuncts, with and without OR.
@@ -598,17 +710,23 @@ int run_exec_checks() {
             }
             const std::string select =
                 "SELECT * FROM oracle WHERE " + where;
-            // Every available path must answer identically: both kinds,
-            // hash only, ISAM only, and the heap.
+            // Every available path must answer identically: all kinds,
+            // each single kind suppressed in turn, static alone, and
+            // the heap.
             const std::vector<std::vector<exec::Value>>* baseline = nullptr;
             std::string baseline_label;
-            for (const auto& [hash_allowed, isam_allowed, label] :
-                 std::vector<std::tuple<bool, bool, std::string>>{
-                     {true, true, "both"}, {true, false, "hash"},
-                     {false, true, "isam"}, {false, false, "heap"}}) {
+            for (const auto& [hash_allowed, isam_allowed, static_allowed,
+                              label] :
+                 std::vector<std::tuple<bool, bool, bool, std::string>>{
+                     {true, true, true, "all"},
+                     {true, false, true, "no isam"},
+                     {false, true, true, "no hash"},
+                     {false, false, true, "static only"},
+                     {false, false, false, "heap"}}) {
                 executor.set_allow_index(true);
                 executor.set_allow_hash(hash_allowed);
                 executor.set_allow_isam(isam_allowed);
+                executor.set_allow_static(static_allowed);
                 exec::StatementResult run;
                 if (!run_sql(executor, select, run, error)) {
                     all_match = false;
@@ -638,13 +756,14 @@ int run_exec_checks() {
             }
             executor.set_allow_hash(true);
             executor.set_allow_isam(true);
+            executor.set_allow_static(true);
             if (!all_match) {
                 break;
             }
         }
-        check(all_match, "300 random predicates: hash, ISAM, and heap paths "
-                         "all agree" +
-                             (all_match ? std::string() : " — " + first_mismatch));
+        check(all_match, "300 random predicates: hash, static, ISAM, and "
+                         "heap paths all agree" +
+                              (all_match ? std::string() : " — " + first_mismatch));
         executor.set_allow_index(true);
         check(executor.close_all(error), "oracle session closed");
     }

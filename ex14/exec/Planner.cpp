@@ -83,14 +83,16 @@ ScanPlan plan_where(BoundExprPtr where,
         conjuncts.push_back(std::move(where));
     }
 
-    // Two accumulators (D8): the hash point an equality claims, and the
-    // ISAM bounds the range/equality conjuncts intersect into. The
-    // conjuncts behind each accumulator stay alive until the path is
-    // decided — a losing accumulator's conjuncts become residual.
+    // Three accumulators (D8): the point an equality claims — hash
+    // first, static second — and the ISAM bounds the range/equality
+    // conjuncts intersect into. The conjuncts behind each accumulator
+    // stay alive until the path is decided — a losing accumulator's
+    // conjuncts become residual.
     std::optional<IndexBounds> hash_point;
+    std::optional<IndexBounds> static_point;
     std::optional<IndexBounds> bounds;
     std::vector<BoundExprPtr> isam_conjuncts;
-    std::vector<BoundExprPtr> hash_extras;
+    std::vector<BoundExprPtr> point_extras;
 
     for (BoundExprPtr& conjunct : conjuncts) {
         // Shape 1: column op literal. Shape 2: literal op column.
@@ -116,14 +118,29 @@ ScanPlan plan_where(BoundExprPtr where,
         const std::size_t column = column_side->column_index;
         CatalogIndex found;
         bool hash_candidate = false;
+        bool static_candidate = false;
         if (op == sql::BinaryOp::Ne) {
             plan.residual.push_back(std::move(conjunct));
             continue;
         }
         if (op == sql::BinaryOp::Eq) {
-            // An equality prefers the hash scan and falls back to ISAM.
+            // An equality prefers the hash scan, then the static scan,
+            // and falls back to ISAM. The first point claimed wins;
+            // later point-capable equalities filter its rows instead.
+            const bool point_taken = hash_point || static_point;
             if (index_of_kind(indexes, column, sql::IndexKind::Hash, found)) {
+                if (point_taken) {
+                    point_extras.push_back(std::move(conjunct));
+                    continue;
+                }
                 hash_candidate = true;
+            } else if (index_of_kind(indexes, column,
+                                     sql::IndexKind::Static, found)) {
+                if (point_taken) {
+                    point_extras.push_back(std::move(conjunct));
+                    continue;
+                }
+                static_candidate = true;
             } else if (!index_of_kind(indexes, column, sql::IndexKind::Isam,
                                       found)) {
                 plan.residual.push_back(std::move(conjunct));
@@ -131,28 +148,30 @@ ScanPlan plan_where(BoundExprPtr where,
             }
         } else if (!index_of_kind(indexes, column, sql::IndexKind::Isam,
                                   found)) {
-            // A range never selects the hash path: hash answers
-            // equality only, so a range on a hash-only column is
-            // residual.
+            // A range never selects the hash or static path: both
+            // answer equality only, so a range on a column with only
+            // those kinds is residual.
             plan.residual.push_back(std::move(conjunct));
             continue;
         }
 
         const Value value = literal_side->literal;
-        if (hash_candidate) {
-            if (!hash_point) {
-                hash_point = IndexBounds{};
-                hash_point->column_index = column;
-                hash_point->index_name = found.name;
-                hash_point->lo = value;
-                hash_point->lo_inclusive = true;
-                hash_point->hi = value;
-                hash_point->hi_inclusive = true;
+        if (hash_candidate || static_candidate) {
+            std::optional<IndexBounds>& point =
+                hash_candidate ? hash_point : static_point;
+            if (!point) {
+                point = IndexBounds{};
+                point->column_index = column;
+                point->index_name = found.name;
+                point->lo = value;
+                point->lo_inclusive = true;
+                point->hi = value;
+                point->hi_inclusive = true;
                 continue;
             }
-            // The first equality claimed the hash scan; this conjunct
-            // filters the claimed point's rows instead.
-            hash_extras.push_back(std::move(conjunct));
+            // Unreachable: the point_taken guard above reroutes every
+            // later point-capable equality to point_extras.
+            point_extras.push_back(std::move(conjunct));
             continue;
         }
 
@@ -207,15 +226,17 @@ ScanPlan plan_where(BoundExprPtr where,
         isam_conjuncts.push_back(std::move(conjunct));
     }
 
-    if (hash_point) {
-        // The hash scan drives; every other indexable conjunct filters
+    if (hash_point || static_point) {
+        // A point scan drives; every other indexable conjunct filters
         // its rows as residual.
-        plan.use_hash = true;
-        plan.bounds = std::move(*hash_point);
+        const bool hash_wins = hash_point.has_value();
+        plan.use_hash = hash_wins;
+        plan.use_static = !hash_wins;
+        plan.bounds = std::move(hash_wins ? *hash_point : *static_point);
         for (BoundExprPtr& conjunct : isam_conjuncts) {
             plan.residual.push_back(std::move(conjunct));
         }
-        for (BoundExprPtr& conjunct : hash_extras) {
+        for (BoundExprPtr& conjunct : point_extras) {
             plan.residual.push_back(std::move(conjunct));
         }
     } else if (bounds) {

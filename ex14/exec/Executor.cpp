@@ -13,6 +13,40 @@
 
 namespace exec {
 
+namespace {
+
+// SQL-created static hash indexes use this fixed bucket count (design
+// D4): the teaching-scale directory, 2,720 direct slots before any
+// chain grows. The module API still takes N explicitly.
+constexpr std::uint32_t kDefaultStaticBuckets = 8;
+
+// The catalog's kind string to the index kind (the catalog reader
+// already validated the value).
+sql::IndexKind index_kind_of(const std::string& kind) {
+    if (kind == "isam") {
+        return sql::IndexKind::Isam;
+    }
+    if (kind == "static hash") {
+        return sql::IndexKind::Static;
+    }
+    return sql::IndexKind::Hash;
+}
+
+// The catalog's kind spelling for error messages.
+const char* kind_label(sql::IndexKind kind) {
+    switch (kind) {
+        case sql::IndexKind::Isam:
+            return "ISAM";
+        case sql::IndexKind::Static:
+            return "static hash";
+        case sql::IndexKind::Hash:
+            return "hash";
+    }
+    return "hash";
+}
+
+}
+
 Executor::Executor(bufman::BufferManager& manager,
                    const std::string& catalog_directory)
     : manager_(manager), catalog_directory_(catalog_directory) {
@@ -29,8 +63,10 @@ std::string Executor::data_path(const std::string& table_name) const {
 std::string Executor::index_path(const std::string& data_file,
                                  const std::string& column_name,
                                  sql::IndexKind kind) const {
-    return data_file + "." + column_name +
-           (kind == sql::IndexKind::Hash ? ".hdx" : ".idx");
+    const char* extension = kind == sql::IndexKind::Hash    ? ".hdx"
+                            : kind == sql::IndexKind::Isam  ? ".idx"
+                                                            : ".shdx";
+    return data_file + "." + column_name + extension;
 }
 
 bool Executor::load_catalog(const std::string& name, std::string& error) {
@@ -68,17 +104,31 @@ void Executor::forget_file(const std::string& path) {
 bool Executor::index_insert(const SessionIndex& session_index,
                             const tuple::Column& value, isam::Rid rid,
                             std::string& error) {
-    return session_index.kind == sql::IndexKind::Hash
-               ? session_index.hash->insert(value, rid, error)
-               : session_index.index->insert(value, rid, error);
+    switch (session_index.kind) {
+        case sql::IndexKind::Hash:
+            return session_index.hash->insert(value, rid, error);
+        case sql::IndexKind::Static:
+            return session_index.static_hash->insert(value, rid, error);
+        case sql::IndexKind::Isam:
+            return session_index.index->insert(value, rid, error);
+    }
+    error = "unknown index kind";
+    return false;
 }
 
 bool Executor::index_erase(const SessionIndex& session_index,
                            const tuple::Column& value, isam::Rid rid,
                            std::string& error) {
-    return session_index.kind == sql::IndexKind::Hash
-               ? session_index.hash->erase(value, rid, error)
-               : session_index.index->erase(value, rid, error);
+    switch (session_index.kind) {
+        case sql::IndexKind::Hash:
+            return session_index.hash->erase(value, rid, error);
+        case sql::IndexKind::Static:
+            return session_index.static_hash->erase(value, rid, error);
+        case sql::IndexKind::Isam:
+            return session_index.index->erase(value, rid, error);
+    }
+    error = "unknown index kind";
+    return false;
 }
 
 const schema::TableSchema* Executor::table(
@@ -130,9 +180,7 @@ heapfile::HeapFile* Executor::file_for(const std::string& table_name,
         if (!column) {
             continue;  // the catalog is checked on write; tolerate here
         }
-        const sql::IndexKind kind = declared.kind == "isam"
-                                        ? sql::IndexKind::Isam
-                                        : sql::IndexKind::Hash;
+        const sql::IndexKind kind = index_kind_of(declared.kind);
         SessionIndex session_index;
         session_index.column_index = *column;
         session_index.index_name = declared.name;
@@ -143,15 +191,27 @@ heapfile::HeapFile* Executor::file_for(const std::string& table_name,
                 std::make_unique<hashindex::ExtensibleHashIndex>(manager_,
                                                                  schema,
                                                                  *column);
+        } else if (kind == sql::IndexKind::Static) {
+            session_index.static_hash =
+                std::make_unique<hashindex::StaticHashIndex>(manager_, schema,
+                                                             *column);
         } else {
             session_index.index =
                 std::make_unique<isam::IsamIndex>(manager_, schema, *column);
         }
         const std::string idx_path = index_path(path, declared.column, kind);
-        const bool opened =
-            kind == sql::IndexKind::Hash
-                ? session_index.hash->open(idx_path, error)
-                : session_index.index->open(idx_path, error);
+        bool opened = false;
+        switch (kind) {
+            case sql::IndexKind::Hash:
+                opened = session_index.hash->open(idx_path, error);
+                break;
+            case sql::IndexKind::Static:
+                opened = session_index.static_hash->open(idx_path, error);
+                break;
+            case sql::IndexKind::Isam:
+                opened = session_index.index->open(idx_path, error);
+                break;
+        }
         if (!opened) {
             error.clear();
             // Build from the file's current rows.
@@ -168,10 +228,19 @@ heapfile::HeapFile* Executor::file_for(const std::string& table_name,
                 error = scan_error;
                 return nullptr;
             }
-            const bool built =
-                kind == sql::IndexKind::Hash
-                    ? session_index.hash->build(idx_path, entries, error)
-                    : session_index.index->build(idx_path, entries, error);
+            bool built = false;
+            switch (kind) {
+                case sql::IndexKind::Hash:
+                    built = session_index.hash->build(idx_path, entries, error);
+                    break;
+                case sql::IndexKind::Static:
+                    built = session_index.static_hash->build(
+                        idx_path, kDefaultStaticBuckets, entries, error);
+                    break;
+                case sql::IndexKind::Isam:
+                    built = session_index.index->build(idx_path, entries, error);
+                    break;
+            }
             if (!built) {
                 return nullptr;
             }
@@ -184,10 +253,44 @@ heapfile::HeapFile* Executor::file_for(const std::string& table_name,
     return inserted->second.file.get();
 }
 
+bool Executor::close_session_indexes(SessionFile& entry,
+                                     std::string& error) {
+    bool ok = true;
+    for (SessionIndex& session_index : entry.indexes) {
+        std::string close_error;
+        bool closed = false;
+        switch (session_index.kind) {
+            case sql::IndexKind::Hash:
+                closed = session_index.hash->close(close_error);
+                break;
+            case sql::IndexKind::Static:
+                closed = session_index.static_hash->close(close_error);
+                break;
+            case sql::IndexKind::Isam:
+                closed = session_index.index->close(close_error);
+                break;
+        }
+        if (!closed) {
+            if (!error.empty()) {
+                error += "; ";
+            }
+            error += close_error;
+            ok = false;
+        }
+    }
+    entry.indexes.clear();
+    return ok;
+}
+
 bool Executor::close_all(std::string& error) {
     error.clear();
     bool ok = true;
     for (auto& [path, entry] : files_) {
+        // The index files first: their dirty pages must reach disk, and
+        // no frame may stay pinned across the heap file's close.
+        if (!close_session_indexes(entry, error)) {
+            ok = false;
+        }
         std::string close_error;
         if (!entry.file->close(close_error)) {
             if (!error.empty()) {
@@ -317,13 +420,22 @@ bool Executor::check_indexes(const std::string& table_name,
     for (const SessionIndex& session_index : found->second.indexes) {
         std::size_t walked = 0;
         std::vector<std::string> findings;
-        if (session_index.kind == sql::IndexKind::Hash) {
-            if (!session_index.hash->verify(occupied, walked, findings,
-                                            error)) {
-                return false;
-            }
-        } else if (!session_index.index->verify(occupied, walked, findings,
-                                                error)) {
+        bool verified = false;
+        switch (session_index.kind) {
+            case sql::IndexKind::Hash:
+                verified = session_index.hash->verify(occupied, walked,
+                                                      findings, error);
+                break;
+            case sql::IndexKind::Static:
+                verified = session_index.static_hash->verify(occupied, walked,
+                                                             findings, error);
+                break;
+            case sql::IndexKind::Isam:
+                verified = session_index.index->verify(occupied, walked,
+                                                       findings, error);
+                break;
+        }
+        if (!verified) {
             return false;
         }
         std::string line = session_index.index_name + ": " +
@@ -452,9 +564,14 @@ bool Executor::handle_drop_table(const sql::DropTableStatement& statement,
         return false;  // unknown table: named error from the loader
     }
     const std::string data_file = data_path(statement.table);
-    // Close the session file first (erase_file refuses while open).
+    // Close the session file first (erase_file refuses while open) —
+    // the session indexes before the heap, so their files are complete
+    // on disk before anything is removed.
     const auto found = files_.find(data_file);
     if (found != files_.end()) {
+        if (!close_session_indexes(found->second, error)) {
+            return false;
+        }
         std::string close_error;
         if (!found->second.file->close(close_error)) {
             error = close_error;
@@ -472,9 +589,7 @@ bool Executor::handle_drop_table(const sql::DropTableStatement& statement,
     }
     for (const schema::TableIndex& declared : indexes) {
         const std::string idx = index_path(data_file, declared.column,
-                                           declared.kind == "isam"
-                                               ? sql::IndexKind::Isam
-                                               : sql::IndexKind::Hash);
+                                           index_kind_of(declared.kind));
         if (std::remove(idx.c_str()) != 0 && errno != ENOENT) {
             error = "cannot erase index file '" + idx + "'";
             return false;
@@ -506,15 +621,12 @@ bool Executor::handle_create_index(
                 statement.table + "'";
         return false;
     }
-    const sql::IndexKind kind = statement.using_kind == sql::IndexKind::Isam
-                                    ? sql::IndexKind::Isam
-                                    : sql::IndexKind::Hash;
+    const sql::IndexKind kind = statement.using_kind;
     for (const schema::TableIndex& declared : entry.indexes) {
         if (declared.column == statement.column &&
-            (declared.kind == "hash") == (kind == sql::IndexKind::Hash)) {
+            index_kind_of(declared.kind) == kind) {
             error = "column '" + statement.column + "' already carries a " +
-                    (kind == sql::IndexKind::Hash ? std::string("hash")
-                                                  : std::string("ISAM")) +
+                    kind_label(kind) +
                     " index (one index per column and kind)";
             return false;
         }
@@ -527,7 +639,9 @@ bool Executor::handle_create_index(
     schema::TableIndex declared;
     declared.name = statement.index_name;
     declared.column = statement.column;
-    declared.kind = kind == sql::IndexKind::Hash ? "hash" : "isam";
+    declared.kind = kind == sql::IndexKind::Hash     ? "hash"
+                    : kind == sql::IndexKind::Isam   ? "isam"
+                                                     : "static hash";
     entry.indexes.push_back(declared);
     if (!save_catalog(statement.table, error)) {
         entry.indexes.pop_back();
@@ -547,6 +661,10 @@ bool Executor::handle_create_index(
             session_index.hash =
                 std::make_unique<hashindex::ExtensibleHashIndex>(
                     manager_, entry.schema, *column);
+        } else if (kind == sql::IndexKind::Static) {
+            session_index.static_hash =
+                std::make_unique<hashindex::StaticHashIndex>(
+                    manager_, entry.schema, *column);
         } else {
             session_index.index =
                 std::make_unique<isam::IsamIndex>(manager_, entry.schema,
@@ -563,10 +681,19 @@ bool Executor::handle_create_index(
                                  isam::Rid{it.row_id().page_id,
                                            it.row_id().slot});
         }
-        const bool built =
-            kind == sql::IndexKind::Hash
-                ? session_index.hash->build(idx_path, entries, error)
-                : session_index.index->build(idx_path, entries, error);
+        bool built = false;
+        switch (kind) {
+            case sql::IndexKind::Hash:
+                built = session_index.hash->build(idx_path, entries, error);
+                break;
+            case sql::IndexKind::Static:
+                built = session_index.static_hash->build(
+                    idx_path, kDefaultStaticBuckets, entries, error);
+                break;
+            case sql::IndexKind::Isam:
+                built = session_index.index->build(idx_path, entries, error);
+                break;
+        }
         if (!scan_error.empty() || !built) {
             entry.indexes.pop_back();
             save_catalog(statement.table, error);
@@ -632,12 +759,14 @@ bool Executor::drop_index_in(const std::string& name, CatalogEntry& entry,
     const std::string data_file = data_path(name);
     const std::string idx = index_path(
         data_file, entry.indexes[position].column,
-        entry.indexes[position].kind == "isam" ? sql::IndexKind::Isam
-                                               : sql::IndexKind::Hash);
-    // Close the session file so the index file is flushed and unpinned
-    // before erasure.
+        index_kind_of(entry.indexes[position].kind));
+    // Close the session file so the index file is flushed, unpinned,
+    // and closed before erasure — the session indexes first.
     const auto found = files_.find(data_file);
     if (found != files_.end()) {
+        if (!close_session_indexes(found->second, error)) {
+            return false;
+        }
         std::string close_error;
         if (!found->second.file->close(close_error)) {
             error = close_error;
@@ -842,13 +971,14 @@ bool Executor::handle_select(const sql::SelectStatement& statement,
     std::vector<CatalogIndex> planner_indexes;
     if (allow_index_) {
         for (const schema::TableIndex& declared : entry.indexes) {
-            const sql::IndexKind kind = declared.kind == "isam"
-                                            ? sql::IndexKind::Isam
-                                            : sql::IndexKind::Hash;
+            const sql::IndexKind kind = index_kind_of(declared.kind);
             if (kind == sql::IndexKind::Hash && !allow_hash_) {
                 continue;
             }
             if (kind == sql::IndexKind::Isam && !allow_isam_) {
+                continue;
+            }
+            if (kind == sql::IndexKind::Static && !allow_static_) {
                 continue;
             }
             const std::optional<std::size_t> column =
@@ -861,9 +991,11 @@ bool Executor::handle_select(const sql::SelectStatement& statement,
     }
     ScanPlan plan = plan_where(std::move(where), planner_indexes);
 
-    result.rows.access_path = plan.use_hash  ? "hash scan"
-                              : plan.use_index ? "index scan"
-                                               : "heap scan";
+    result.rows.access_path =
+        plan.use_hash     ? "hash scan"
+        : plan.use_static ? "static scan"
+        : plan.use_index  ? "index scan"
+                          : "heap scan";
 
     // The session file, opened on first use (missing data file: no rows
     // can exist, so the SELECT answers empty).
@@ -886,8 +1018,8 @@ bool Executor::handle_select(const sql::SelectStatement& statement,
         return tuple::Column(std::get<std::string>(value));
     };
 
-    // Collect the candidate rows: the hash and index scans yield row
-    // ids; the heap path scans every record.
+    // Collect the candidate rows: the hash, static, and index scans
+    // yield row ids; the heap path scans every record.
     std::vector<heapfile::RowId> candidates;
     if (plan.use_hash) {
         hashindex::ExtensibleHashIndex* index = nullptr;
@@ -900,6 +1032,29 @@ bool Executor::handle_select(const sql::SelectStatement& statement,
         }
         if (index == nullptr) {
             plan.use_hash = false;  // tolerate and scan
+            result.rows.access_path = "heap scan";
+        } else {
+            std::vector<isam::Rid> rids;
+            if (!index->lookup(to_column(*plan.bounds.lo), rids, error)) {
+                return false;
+            }
+            candidates.reserve(rids.size());
+            for (const isam::Rid& rid : rids) {
+                candidates.push_back(
+                    heapfile::RowId{rid.page_id, rid.slot});
+            }
+        }
+    } else if (plan.use_static) {
+        hashindex::StaticHashIndex* index = nullptr;
+        for (const SessionIndex& session_index : found->second.indexes) {
+            if (session_index.kind == sql::IndexKind::Static &&
+                session_index.column_index == plan.bounds.column_index) {
+                index = session_index.static_hash.get();
+                break;
+            }
+        }
+        if (index == nullptr) {
+            plan.use_static = false;  // tolerate and scan
             result.rows.access_path = "heap scan";
         } else {
             std::vector<isam::Rid> rids;
@@ -949,7 +1104,7 @@ bool Executor::handle_select(const sql::SelectStatement& statement,
         }
     }
 
-    if (!plan.use_hash && !plan.use_index) {
+    if (!plan.use_hash && !plan.use_static && !plan.use_index) {
         heapfile::HeapFileIterator it = file->scan();
         tuple::Tuple tuple;
         std::string scan_error;

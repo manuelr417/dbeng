@@ -1749,6 +1749,15 @@ int run_storage_checks() {
         check(schema::parse_table_schema(
                   "{\"table_name\":\"t\",\"columns\":[{\"column_name\":\"a\","
                   "\"column_type\":\"Integer\",\"size\":4}],"
+                  "\"indexes\":[{\"name\":\"t_a\",\"column\":\"a\","
+                  "\"kind\":\"static hash\"}]}",
+                  parsed, parsed_indexes, err) &&
+                  parsed_indexes.size() == 1 &&
+                  parsed_indexes[0].kind == "static hash",
+              "a static hash kind parses");
+        check(schema::parse_table_schema(
+                  "{\"table_name\":\"t\",\"columns\":[{\"column_name\":\"a\","
+                  "\"column_type\":\"Integer\",\"size\":4}],"
                   "\"indexes\":[{\"name\":\"t_a\",\"column\":\"a\"}]}",
                   parsed, parsed_indexes, err) &&
                   parsed_indexes.size() == 1 &&
@@ -1833,6 +1842,15 @@ int run_storage_checks() {
                   written_indexes.size() == 1 &&
                   written_indexes[0].kind == "hash",
               "a saved kind round-trips");
+        check(schema::save_table_schema(catalog_path, person,
+                                        {{"person_pid", "pid", "static hash"}},
+                                        err),
+              "save_table_schema writes a catalog with a static hash kind");
+        check(schema::load_table_schema(catalog_path, written,
+                                        written_indexes, err) &&
+                  written_indexes.size() == 1 &&
+                  written_indexes[0].kind == "static hash",
+              "a saved static hash kind round-trips");
         {
             schema::TableSchema bad_kind_out("");
             std::vector<schema::TableIndex> bad_kind_indexes = {

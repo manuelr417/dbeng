@@ -1137,6 +1137,34 @@ int run_sql_checks() {
         check(fails("CREATE INDEX p_idx ON person (pid) USING isam extra"),
               "create index with trailing garbage after USING fails");
 
+        // --- the STATIC HASH kind: two tokens, one kind ---
+        check(tokens_are("using static hash",
+                         {{sql::TokenType::Using, "using"},
+                          {sql::TokenType::Static, "static"},
+                          {sql::TokenType::Hash, "hash"}}),
+              "lexer: using/static/hash token stream");
+        const sql::Statement* static_stmt =
+            ok_parse("CREATE INDEX p_idx ON person (pid) using static hash");
+        check(static_stmt != nullptr &&
+                  static_stmt->kind == sql::Statement::Kind::CreateIndex,
+              "create index USING STATIC HASH parses in any case");
+        if (static_stmt != nullptr &&
+            static_stmt->kind == sql::Statement::Kind::CreateIndex) {
+            const auto& ci =
+                static_cast<const sql::CreateIndexStatement&>(*static_stmt);
+            check(ci.has_using && ci.using_kind == sql::IndexKind::Static,
+                  "USING STATIC HASH marks the statement and picks static");
+        }
+        check(round_trips("CREATE INDEX p_idx ON person (pid) USING STATIC HASH"),
+              "create index USING STATIC HASH round-trips through the printer");
+        check(contains(draw_of("CREATE INDEX p_idx ON person (pid) USING STATIC HASH"),
+                       "STATIC HASH"),
+              "draw: the static kind shows both words");
+        check(fails("CREATE INDEX p_idx ON person (pid) USING STATIC"),
+              "create index with a bare STATIC fails");
+        check(fails("CREATE INDEX p_idx ON person (pid) USING STATIC ISAM"),
+              "create index with STATIC ISAM fails");
+
         check(fails("CREATE INDEX p_idx ON person"),
               "create index without column list fails");
         check(fails("CREATE INDEX p_idx ON person ()"),

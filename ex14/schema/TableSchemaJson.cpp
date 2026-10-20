@@ -310,7 +310,8 @@ bool walk_columns(Cursor& cur, std::vector<LoadedColumn>& columns) {
 }
 
 // The optional "indexes" array: one object per entry, each with "name",
-// "column", and an optional "kind" ("hash" or "isam"; absent means
+// "column", and an optional "kind" ("hash", "isam", or "static hash";
+// absent means
 // "isam", the ex13-era shape). Unlike "columns" it may be empty — a
 // table with no indexes is the normal ex11-era shape, just made explicit.
 bool walk_indexes(Cursor& cur, std::vector<TableIndex>& indexes) {
@@ -393,7 +394,8 @@ bool walk_indexes(Cursor& cur, std::vector<TableIndex>& indexes) {
         if (index.column.empty()) {
             return cur.fail("index '" + index.name + "': column is empty");
         }
-        if (index.kind != "hash" && index.kind != "isam") {
+        if (index.kind != "hash" && index.kind != "isam" &&
+            index.kind != "static hash") {
             return cur.fail("index '" + index.name + "': unknown kind '" +
                             index.kind + "'");
         }
@@ -619,7 +621,8 @@ bool save_table_schema(const std::string& path, const TableSchema& schema,
                     index.column + "'";
             return false;
         }
-        if (index.kind != "hash" && index.kind != "isam") {
+        if (index.kind != "hash" && index.kind != "isam" &&
+            index.kind != "static hash") {
             error = "cannot save a catalog for table '" + schema.table_name() +
                     "': index '" + index.name + "' has unknown kind '" +
                     index.kind + "'";

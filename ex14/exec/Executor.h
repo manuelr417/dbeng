@@ -10,7 +10,8 @@
 //
 // Physical naming: a table's data file is `data/<table>.tbl` (the
 // `data` directory is created on demand); an index file is
-// `data/<table>.tbl.<column>.idx` beside it.
+// `data/<table>.tbl.<column>.idx` (ISAM), `.hdx` (hash), or `.shdx`
+// (static hash) beside it.
 // Opening a data file builds any catalog-declared index file that is
 // missing (lazy rebuild), and every write through a session file
 // maintains that file's indexes.
@@ -19,6 +20,7 @@
 #include "exec/Planner.h"
 #include "exec/Value.h"
 #include "hashindex/ExtensibleHashIndex.h"
+#include "hashindex/StaticHashIndex.h"
 #include "heapfile/HeapFile.h"
 #include "index/IsamIndex.h"
 #include "schema/TableSchema.h"
@@ -61,6 +63,7 @@ public:
     void set_allow_index(bool allow) { allow_index_ = allow; }
     void set_allow_hash(bool allow) { allow_hash_ = allow; }
     void set_allow_isam(bool allow) { allow_isam_ = allow; }
+    void set_allow_static(bool allow) { allow_static_ = allow; }
 
     // The table's schema and catalog indexes (loading the catalog on
     // first use). Null with a named error for an unknown table.
@@ -114,6 +117,7 @@ private:
         sql::IndexKind kind = sql::IndexKind::Hash;
         std::unique_ptr<isam::IsamIndex> index;                // ISAM kind
         std::unique_ptr<hashindex::ExtensibleHashIndex> hash;  // hash kind
+        std::unique_ptr<hashindex::StaticHashIndex> static_hash;
     };
 
     struct SessionFile {
@@ -162,6 +166,13 @@ private:
                      const tuple::Column& value, isam::Rid rid,
                      std::string& error);
 
+    // The teardown half of the union: closes every session index's file
+    // through the manager — flushing its dirty pages — before the data
+    // file closes or an index file is removed. Index pages reach disk
+    // only on eviction or close, so a session index must be closed for
+    // its file to be complete on disk.
+    bool close_session_indexes(SessionFile& entry, std::string& error);
+
     bufman::BufferManager& manager_;
     std::string catalog_directory_;
     std::unordered_map<std::string, CatalogEntry> catalogs_;
@@ -169,6 +180,7 @@ private:
     bool allow_index_ = true;
     bool allow_hash_ = true;
     bool allow_isam_ = true;
+    bool allow_static_ = true;
 };
 
 }

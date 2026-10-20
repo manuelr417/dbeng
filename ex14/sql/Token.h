@@ -18,7 +18,7 @@ enum class TokenType {
     Insert, Into, Values,
     Update, Set, Delete,
     Create, Table, Drop, Index,
-    Using, Hash, Isam,
+    Using, Hash, Isam, Static,
     Asc, Desc,
     Integer, Int, Double, Varchar,
     // literals
@@ -59,7 +59,7 @@ inline TokenType keyword_of(std::string_view word) {
         {"table", TokenType::Table},     {"drop", TokenType::Drop},
         {"index", TokenType::Index},
         {"using", TokenType::Using},     {"hash", TokenType::Hash},
-        {"isam", TokenType::Isam},
+        {"isam", TokenType::Isam},       {"static", TokenType::Static},
         {"asc", TokenType::Asc},         {"desc", TokenType::Desc},
         {"integer", TokenType::Integer}, {"int", TokenType::Int},
         {"double", TokenType::Double},   {"varchar", TokenType::Varchar},
