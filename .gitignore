@@ -27,3 +27,6 @@
 
 # macOS metadata
 **/.DS_Store
+
+# Runtime table data and index scratch
+ex14/data/
