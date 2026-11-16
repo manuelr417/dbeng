@@ -1,0 +1,285 @@
+#include "bufpool/BufferManager.h"
+
+#include "common/Error.h"
+
+#include <cassert>
+#include <cstring>
+#include <functional>
+
+namespace bufman {
+
+static_assert(kPageSize == kBlockSize, "frames and file blocks must match");
+
+std::size_t BufferManager::PageKeyHash::operator()(const PageKey& key) const {
+    const std::size_t h1 = std::hash<int>{}(key.fd);
+    const std::size_t h2 = std::hash<std::uint64_t>{}(key.block_number);
+    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+}
+
+void BufferManager::init(std::size_t pool_size, std::unique_ptr<ReplacementPolicy> policy) {
+    for (OpenFile& entry : files_) {
+        bufman::close(entry.file);
+    }
+    files_.clear();
+    page_table_.clear();
+    frame_page_.assign(pool_size, std::nullopt);
+    pool_.init(pool_size);
+    policy_ = std::move(policy);
+    if (policy_) {
+        policy_->init(pool_size);
+    }
+}
+
+bufman::File BufferManager::open_file(const std::string& path) {
+    bufman::File opened = bufman::open_for_append(path);
+    files_.push_back({opened, path});
+    return opened;
+}
+
+bufman::File BufferManager::open_file_read(const std::string& path) {
+    bufman::File opened = bufman::open_for_read(path);
+    files_.push_back({opened, path});
+    return opened;
+}
+
+// A frame to reuse: never-used frames first (they never cost a write-back),
+// then the policy's pick among the page-holding, unpinned frames.
+std::optional<std::size_t> BufferManager::find_victim_frame() const {
+    for (std::size_t i = 0; i < frame_page_.size(); ++i) {
+        if (!frame_page_[i]) {
+            return i;
+        }
+    }
+    std::vector<std::size_t> candidates;
+    for (std::size_t i = 0; i < frame_page_.size(); ++i) {
+        if (frame_page_[i] && pool_.frame(i).pin_count == 0) {
+            candidates.push_back(i);
+        }
+    }
+    return policy_->pick_victim(candidates);
+}
+
+bufman::File* BufferManager::find_file(int fd) {
+    for (OpenFile& entry : files_) {
+        if (entry.file.fd == fd) {
+            return &entry.file;
+        }
+    }
+    return nullptr;
+}
+
+// Shared by pin (miss) and alloc_page: write the frame's page back if it is
+// dirty, then forget it so the frame is free for a new page.
+void BufferManager::evict_frame(std::size_t frame) {
+    const std::optional<PageKey>& old = frame_page_[frame];
+    if (old) {
+        DataFrame& data = pool_.frame(frame);
+        if (data.dirty) {
+            bufman::File* old_file = find_file(old->fd);
+            // Internal contract: every open fd is tracked in files_.
+            assert(old_file != nullptr && "victim page's file must be tracked");
+            bufman::write_block(*old_file, old->block_number, data.buffer,
+                                kBlockSize);
+        }
+        page_table_.erase(*old);
+        policy_->on_remove(frame);
+        frame_page_[frame] = std::nullopt;
+    }
+}
+
+void BufferManager::pin(bufman::File& file, std::uint64_t block_number,
+                        std::size_t& frame) {
+    // Internal contract: init() runs once before any pool traffic.
+    assert(policy_ && pool_.size() > 0 && "init must run before pin");
+
+    const PageKey key{file.fd, block_number};
+    const auto hit = page_table_.find(key);
+    if (hit != page_table_.end()) {
+        frame = hit->second;
+        pool_.pin(frame);
+        policy_->on_access(frame);
+        return;
+    }
+
+    const std::optional<std::size_t> victim = find_victim_frame();
+    if (!victim) {
+        throw common::Error("all frames pinned");
+    }
+    frame = *victim;
+    evict_frame(frame);
+
+    DataFrame& data = pool_.frame(frame);
+    bufman::read_block(file, block_number, data.buffer, kBlockSize);
+    frame_page_[frame] = key;
+    page_table_[key] = frame;
+    data.dirty = false;
+    pool_.pin(frame);
+    policy_->on_load(frame);
+}
+
+void BufferManager::alloc_page(bufman::File& file, std::uint64_t block_number,
+                               std::size_t& frame) {
+    // Internal contracts: init() runs once before any pool traffic, the
+    // caller allocates on a file opened through this manager, and a page
+    // is allocated at most once per block.
+    assert(policy_ && pool_.size() > 0 && "init must run before alloc_page");
+    assert(file.fd >= 0 && "alloc requested on a closed file");
+    const PageKey key{file.fd, block_number};
+    assert(page_table_.find(key) == page_table_.end() &&
+           "block is already resident in the pool");
+
+    if (block_number < block_count(file)) {
+        throw common::Error("block already exists on disk");
+    }
+
+    const std::optional<std::size_t> victim = find_victim_frame();
+    if (!victim) {
+        throw common::Error("all frames pinned");
+    }
+    frame = *victim;
+    evict_frame(frame);
+
+    DataFrame& data = pool_.frame(frame);
+    std::memset(data.buffer, 0, kPageSize);
+    frame_page_[frame] = key;
+    page_table_[key] = frame;
+    data.dirty = true;
+    pool_.pin(frame);
+    policy_->on_load(frame);
+}
+
+bool BufferManager::resident(const bufman::File& file, std::uint64_t block_number) const {
+    return page_table_.count(PageKey{file.fd, block_number}) > 0;
+}
+
+void BufferManager::unpin(std::size_t frame, bool was_dirty) {
+    if (was_dirty) {
+        pool_.set_dirty(frame, true);
+    }
+    pool_.unpin(frame);
+}
+
+DataFrame& BufferManager::frame(std::size_t index) {
+    return pool_.frame(index);
+}
+
+const DataFrame& BufferManager::frame(std::size_t index) const {
+    return pool_.frame(index);
+}
+
+void BufferManager::flush(std::size_t frame) {
+    // Internal contract: frames are addressed through pin/alloc return
+    // values, always below the pool size.
+    assert(frame < pool_.size() && "frame index out of range");
+    const std::optional<PageKey>& entry = frame_page_[frame];
+    DataFrame& data = pool_.frame(frame);
+    if (!entry || !data.dirty) {
+        return;
+    }
+    bufman::File* file = find_file(entry->fd);
+    // Internal contract: every open fd is tracked in files_.
+    assert(file != nullptr && "frame's file must be tracked");
+    bufman::write_block(*file, entry->block_number, data.buffer, kBlockSize);
+    pool_.set_dirty(frame, false);
+}
+
+void BufferManager::flush_all() {
+    for (std::size_t i = 0; i < pool_.size(); ++i) {
+        flush(i);
+    }
+}
+
+void BufferManager::close_all() {
+    // A flush failure still propagates, but the fds are going away either
+    // way: teardown happens before the error leaves this function.
+    try {
+        flush_all();
+    } catch (...) {
+        for (OpenFile& entry : files_) {
+            bufman::close(entry.file);
+        }
+        files_.clear();
+        page_table_.clear();
+        frame_page_.assign(pool_.size(), std::nullopt);
+        if (policy_) {
+            policy_->init(pool_.size());
+        }
+        throw;
+    }
+    for (OpenFile& entry : files_) {
+        bufman::close(entry.file);
+    }
+    files_.clear();
+    page_table_.clear();
+    frame_page_.assign(pool_.size(), std::nullopt);
+    if (policy_) {
+        policy_->init(pool_.size());
+    }
+}
+
+void BufferManager::close_file(File& file) {
+    if (file.fd < 0) {
+        throw common::Error("close requested on a closed file");
+    }
+    if (find_file(file.fd) == nullptr) {
+        throw common::Error("file is not open through this manager");
+    }
+    // A pinned frame of this file refuses the close: the caller is
+    // mid-operation and unpinning under it would corrupt the accounting.
+    for (std::size_t i = 0; i < pool_.size(); ++i) {
+        const std::optional<PageKey>& entry = frame_page_[i];
+        if (entry && entry->fd == file.fd &&
+            pool_.frame(i).pin_count != 0) {
+            throw common::Error("a frame of the file is still pinned");
+        }
+    }
+    // Flush the file's dirty pages, then release every frame it holds.
+    for (std::size_t i = 0; i < pool_.size(); ++i) {
+        const std::optional<PageKey>& entry = frame_page_[i];
+        if (!entry || entry->fd != file.fd) {
+            continue;
+        }
+        DataFrame& data = pool_.frame(i);
+        if (data.dirty) {
+            bufman::write_block(file, entry->block_number, data.buffer,
+                                kBlockSize);
+            data.dirty = false;
+        }
+    }
+    for (std::size_t i = 0; i < pool_.size(); ++i) {
+        const std::optional<PageKey>& entry = frame_page_[i];
+        if (entry && entry->fd == file.fd) {
+            frame_page_[i] = std::nullopt;
+            if (policy_) {
+                policy_->on_remove(i);
+            }
+        }
+    }
+    for (auto it = page_table_.begin(); it != page_table_.end();) {
+        if (it->first.fd == file.fd) {
+            it = page_table_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = files_.begin(); it != files_.end(); ++it) {
+        if (it->file.fd == file.fd) {
+            files_.erase(it);
+            break;
+        }
+    }
+    // Closes the descriptor and sets file.fd = -1, invalidating the
+    // caller's copy the same way close_all's teardown does.
+    bufman::close(file);
+}
+
+bool BufferManager::is_open(const std::string& path) const {
+    for (const OpenFile& entry : files_) {
+        if (entry.path == path) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}

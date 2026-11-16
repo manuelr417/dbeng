@@ -25,11 +25,17 @@ The exercises follow a few repo-wide rules:
   directory, exercises are never wired together, and shared code is never
   hoisted to the repo root. Common headers (`Person.h`, `DataFrame.h`) are
   deliberately copied into each exercise that needs them instead of shared.
-- Storage-layer errors all use the same shape: a `bool` return plus an
-  `error` string out-param that is cleared on entry — an empty string after
-  the call means success.
+- Error shape evolved deliberately, in three steps: through ex16 a
+  fallible call returns a `bool` plus an `error` string out-param that is
+  cleared on entry (empty after the call means success), with ex16 adding
+  the `common/Fail.h` `fail`/`wrap` idiom for the plumbing; from ex17 on,
+  failures throw `common::Error` (a `std::runtime_error`) caught once at
+  the CLI/check-harness boundary, and a check that guards a module's own
+  contract is an `assert`. End-of-data and the group table's entry budget
+  stay plain return values in every exercise.
 - There is no test framework: ex07 ships an assert-based test target, the
-  later exercises run PASS/FAIL `check()` calls inline in `main.cpp`.
+  later exercises run PASS/FAIL `check()` calls in `check_*.cpp`
+  translation units driven by `main.cpp`.
 
 ## The exercises
 
@@ -43,17 +49,26 @@ The exercises follow a few repo-wide rules:
 | ex10 | Fixed-length records with per-slot occupancy in a doubly linked page chain; records addressable by `RowId{page_id, slot}` | slotted pages + heap file |
 | ex11 | Schema as data: JSON table catalogs, generic self-describing tuples, fixed-width record layout derived from the catalog, session CLI over named tables | schema-driven storage engine |
 | ex12 | A hand-rolled lexer, recursive-descent parser, and AST behind `sql::parse(query, result, error)` for the SQL subset (CREATE/DROP/INSERT/UPDATE/DELETE/SELECT, JOIN/GROUP BY/ORDER BY/LIMIT) | SQL front-end |
+| ex13 | SQL front door over the ex11 stack: exec layer (binder, planner, executor), an ISAM index, a SQL session CLI, a bulk loader, and a parts benchmark | indexed SQL engine |
+| ex14 | A second access path: the extensible hash index, the `USING HASH \| ISAM` clause, index erase on both kinds, the `delrow` escape hatch | two access paths (ISAM + hash) |
+| ex15 | Grouped aggregation: `GROUP BY`, `HAVING`, and aggregate select items through a static hash operator with a restart-based spill | grouped SQL engine |
+| ex16 | Error discipline restated: named errors at the boundary, asserts for internal contracts, the `common/Fail.h` idiom (behavior unchanged) | same stack, cleaner errors |
+| ex17 | Failures as exceptions: `common/Error.h` thrown at the failure site, caught once at the boundary (behavior unchanged) | same stack, exceptions |
+| ex18 | Readability restated: the `common/PinnedPage` RAII pin guard, named algorithm steps in `HeapFile::insert`, `std::format` messages (behavior unchanged) | same stack, reads like the algorithm |
 
 Each exercise reuses the previous ones' code and on-disk formats, so the
 later exercises form a working stack:
 
 ```text
-Lexer + Parser + AST (sql::parse)     (ex12)
-ex11_cli + schema/catalog + Tuple     (ex11)
-HeapFile / SlottedPage                (ex10)
-BufferManager + ReplacementPolicy/LRU (ex09)
-BufferPool / DataFrame                (ex08)
-BlockFile + Person/serializer         (ex07)
+GROUP BY/HAVING via the static hash operator (group/)   (ex15–ex18)
+sql/ Lexer + Parser + AST + the index statements        (ex12–ex14)
+exec/ Binder + Planner + Executor                       (ex13–ex18)
+index/ IsamIndex, hashindex/ extensible + static hash   (ex13–ex14)
+ex11_cli + schema/catalog + Tuple                       (ex11)
+HeapFile / SlottedPage                                  (ex10)
+BufferManager + ReplacementPolicy/LRU                   (ex09)
+BufferPool / DataFrame                                  (ex08)
+BlockFile + Person/serializer                           (ex07)
 ```
 
 ## Where to look
